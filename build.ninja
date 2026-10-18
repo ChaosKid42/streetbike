@@ -1,0 +1,47 @@
+# Ninja build for Streetbike.
+#
+#   ninja          assemble src/streetbike.asm -> build/streetbike.prg (acme),
+#                  then pack it into build/streetbike.d64 (c1541)
+#   ninja run      assemble, then start the game in VICE
+#   ninja clean    remove the generated build artifacts
+#
+# Run from this directory: the paths below are relative to it.
+
+ninja_required_version = 1.7
+
+acme = acme
+c1541 = c1541.exe
+vice = x64sc.exe
+
+# The source's `!to "build/streetbike.prg", cbm` directive selects the output
+# file and the CBM (two-byte load address) format.
+rule acme
+  description = ACME $in
+  command = $acme $in
+
+build build/streetbike.prg: acme src/streetbike.asm
+
+# c1541 recreates the image from scratch on every run, so an existing
+# streetbike.d64 is simply overwritten. CBM DOS limits the disk name to 16
+# characters, the ID to two, and the file name to 16.
+rule d64
+  description = C1541 $out
+  command = $c1541 -format "streetbike,sb" d64 $out -write $in streetbike
+
+build build/streetbike.d64: d64 build/streetbike.prg
+
+rule vice
+  description = VICE $in
+  command = $vice -autostart $in
+  pool = console
+
+build run: vice build/streetbike.prg
+
+rule clean
+  description = CLEAN build artifacts
+  command = ninja -t clean
+
+# `clean` is never created, so ninja always considers this target dirty.
+build clean: clean
+
+default build/streetbike.prg build/streetbike.d64

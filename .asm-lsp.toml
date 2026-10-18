@@ -1,0 +1,8 @@
+[default_config]
+version = "0.10.1"
+assembler = "acme"
+instruction_set = "6502"
+
+[default_config.opts]
+diagnostics = true
+default_diagnostics = true
