@@ -33,9 +33,11 @@ or BASIC dependencies.
 | Background | Empty screen | Scrolling street, skyline, fixed HUD |
 | Sprites | 2 images at `$2000`/`$2040` | 9 images at `$2000`–`$223F` |
 
-### 2.1 The supplied `src/sprites.asm`
+### 2.1 The supplied sprite images
 
-The file is SpritePad output in 64TASS syntax. Analysis of the three images:
+The supplied sprite set was SpritePad output in 64TASS syntax. Phase 1
+converted it to ACME syntax and inlined it in `src/streetbike.asm`; the
+original `src/sprites.asm` has been removed. Analysis of the three images:
 
 | Image | Label | Use | Notes |
 |-------|-------|-----|-------|
@@ -44,25 +46,19 @@ The file is SpritePad output in 64TASS syntax. Analysis of the three images:
 | 2 | `sprite_image_2` | Jump pose | Rider is higher in the cell; bike sits lower |
 
 - All three are **multicolor** sprites (attribute `$8b`).
-- Shared palette: `mc1 = 5` (green), `mc2 = 14` (light blue). The sprite color
-  register (`$D027`) is not used by the artwork.
+- Shared palette: `mc1 = 5` (green), `mc2 = 14` (light blue). The artwork uses
+  the sprite colour (`$D027`) for the bike frame and wheels; Phase 1 sets it to
+  white for contrast.
 - Each image is 64 bytes (63 visible bytes + 1 padding byte). The 64th byte is
   `$8b` in all three images and is not displayed.
 - The bike faces **right**, which matches the direction of travel.
 - The jump image's bike is roughly 5 pixels higher inside the cell than the
   riding frames, so the jump lift and hitbox must be calibrated in VICE.
 
-The file must be converted to ACME syntax:
-
-- `.byte` → `!byte`
-- Remove the `* = addr_spriteset_data` and `* = addr_spriteset_attrib_data`
-  directives; they would move the program counter into character ROM.
-- Remove (or comment out) the `spriteset_attrib_data` block. Its three `$8b`
-  bytes are metadata, not sprite data, and would break the 64-byte alignment
-  of the obstacle sprites that follow.
-- Keep the SpritePad header comments and the attribute values as documentation.
-- Include the data from `streetbike.asm` inside a `!pseudopc $2000 { ... }`
-  block (or `!fill $2000 - *, 0` followed by the include).
+The data now lives in the `!pseudopc $2000 { ... }` block in
+`src/streetbike.asm`, with labels `spr_bike_a`, `spr_bike_b` and
+`spr_bike_jump`. The SpritePad attribute block was dropped; the per-image
+64th byte (`$8b`) is retained as padding and is not displayed.
 
 ---
 
@@ -133,7 +129,8 @@ $2200  spare / extra  ptr $88
 - Shared multicolor registers:
   - `$D025` (mc1) = `5` (green)
   - `$D026` (mc2) = `14` (light blue)
-- Player colour register `$D027` = `1` (white, unused by the artwork).
+- Player colour register `$D027` = `1` (white; the artwork uses this slot for
+  the bike frame and wheels).
 - Obstacle colours are set per slot from a type table:
 
 | Type | Obstacle | Suggested colour |
@@ -224,6 +221,8 @@ switch on state:
 
 ### Phase 0 — Rename and build
 
+**Status: complete.**
+
 1. Rename `src/dodger.asm` → `src/streetbike.asm`.
 2. Change `!to "build/dodger.prg", cbm` → `!to "build/streetbike.prg", cbm`.
 3. Update `build.ninja`:
@@ -242,11 +241,13 @@ switch on state:
 
 ### Phase 1 — Sprite pipeline
 
+**Status: complete.**
+
 1. Convert `src/sprites.asm` to ACME syntax (`.byte` → `!byte`, remove the
    `* = addr_spriteset_*` directives).
 2. Add labels `spr_bike_a`, `spr_bike_b`, `spr_bike_jump`.
-3. Include the file from `streetbike.asm` after `!fill $2000 - *, 0`, inside
-   `!pseudopc $2000 { ... }`.
+3. Inline the data in `streetbike.asm` after `!fill $2000 - *, 0`, inside
+   `!pseudopc $2000 { ... }`; delete `src/sprites.asm`.
 4. Set `$D025 = 5`, `$D026 = 14`, `$D01C` bit 0 = 1, and the player pointer to
    `$80`.
 5. Temporarily cycle the player pointer through `$80`, `$81`, `$82` on the
@@ -320,7 +321,7 @@ stays perfectly still, and the screen shift happens without visible tearing.
 ### Phase 4 — Obstacles, collision and lives
 
 1. Design the obstacle sprites (see §5). Export each as a 64-byte hires block
-   and add it to `src/sprites.asm`.
+   and add it to the sprite data block in `src/streetbike.asm`.
 2. Add the obstacle type table:
    - sprite pointer
    - colour

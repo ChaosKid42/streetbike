@@ -4,9 +4,10 @@ A Commodore 64 sprite game written for the
 [ACME](https://sourceforge.net/projects/acme-crossass/) cross-assembler and
 tested in **VICE** (`x64sc.exe`).
 
-> **Status:** the project has been renamed to Streetbike. The current build
-> still contains the original asteroid-dodge gameplay; the side-scrolling bike
-> game is being developed according to [`PLAN.md`](PLAN.md).
+> **Status:** the project has been renamed to Streetbike and the bike sprite
+> data is in place. The current build still contains the original
+> asteroid-dodge gameplay; the side-scrolling bike game is being developed
+> according to [`PLAN.md`](PLAN.md).
 
 The original game: you pilot a ship along the bottom of the screen and dodge
 falling asteroids. Each asteroid that passes you scores a point; touching one
@@ -79,8 +80,9 @@ following describes the current (pre-refactor) asteroid gameplay.
 ```
 $0801  BASIC stub:  10 SYS 2061
 $080D  machine code
-$2000  sprite 0 data (player), 64-byte aligned
-$2040  sprite 1-4 data (asteroids), 64-byte aligned
+$2000  bike frame A (player), 64-byte aligned
+$2040  bike frame B (player), 64-byte aligned
+$2080  bike jump pose (player), 64-byte aligned
 $0400  screen matrix
 $D800  colour RAM
 ```
@@ -101,8 +103,9 @@ Key pieces of the source:
 * **`rand_byte`** — an 8-bit LFSR used for asteroid positions.
 * **`beep_hit`** — a short SID noise burst on collision.
 
-Sprites live in VIC bank 0 RAM at `$2000`/`$2040` (pointers `$80`/`$81`),
-deliberately outside the `$1000–$1FFF` character-ROM window.
+Sprites live in VIC bank 0 RAM at `$2000`–`$20BF` (pointers `$80`–`$82`),
+deliberately outside the `$1000–$1FFF` character-ROM window. The player is
+multicolor; the title screen cycles through the three bike images.
 
 ## Ideas for extending it
 

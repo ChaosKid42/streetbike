@@ -10,9 +10,10 @@
 ;  The program takes over the machine: it disables interrupts,
 ;  owns the VIC-II sprites and runs its own frame loop.
 ;
-;  Phase 0 of the refactor renamed the project and its build
-;  outputs. The original asteroid gameplay is still present;
-;  see PLAN.md for the bike-game refactor.
+;  Phase 0 renamed the project and its build outputs. Phase 1
+;  replaced the sprite data with the supplied bike images. The
+;  original asteroid gameplay is still present; see PLAN.md for
+;  the bike-game refactor.
 ; ============================================================
 
 ; The C64's 6510 is a 6502 core with an added I/O port at $00/$01; its
@@ -31,6 +32,9 @@ VIC_SPR_BPRI = $d01b
 VIC_SPR_MCOL = $d01c
 VIC_SPR_XEXP = $d01d
 VIC_SPR_COLL = $d01e
+VIC_SPR_MC1  = $d025
+VIC_SPR_MC2  = $d026
+VIC_SPR0_COL = $d027
 VIC_RASTER   = $d012
 VIC_BORDER   = $d020
 VIC_BG       = $d021
@@ -63,9 +67,11 @@ zp_dst       = $0a          ; 2 bytes, screen pointer
 zp_joy       = $0c
 zp_cool      = $0d          ; game-over restart delay
 zp_snd       = $0e          ; sound countdown
+zp_anim      = $0f          ; title-screen image countdown (temporary)
 zp_enemy_x   = $10          ; 4 bytes
 zp_enemy_y   = $14          ; 4 bytes
 zp_enemy_spd = $18          ; 4 bytes
+zp_bike_frame = $1c         ; title-screen bike image index (temporary)
 
 PLAYER_Y     = 220
 PLAYER_MIN_X = 24
@@ -136,26 +142,33 @@ start:
     jsr fill_color
 
     ; sprite data pointers -----------------------------------
-    lda #$80                ; $2000 / 64
+    lda #$80                ; $2000 / 64 : bike frame A
     sta SPR_PTR+0           ; sprite 0 : player
-    lda #$81                ; $2040 / 64
-    sta SPR_PTR+1           ; sprites 1-4 : enemies
-    sta SPR_PTR+2
+    lda #$81                ; $2040 / 64 : bike frame B
+    sta SPR_PTR+1           ; sprites 1-4 : placeholder until
+    sta SPR_PTR+2           ; obstacle sprites exist (Phase 4)
     sta SPR_PTR+3
     sta SPR_PTR+4
 
     ; sprite colours -----------------------------------------
     lda #1
-    sta $d027               ; player : white
+    sta VIC_SPR0_COL        ; player : white
     lda #2
-    sta $d028
-    sta $d029
-    sta $d02a
-    sta $d02b               ; enemies : red
+    sta VIC_SPR0_COL+1
+    sta VIC_SPR0_COL+2
+    sta VIC_SPR0_COL+3
+    sta VIC_SPR0_COL+4      ; enemies : red
 
-    ; hires, no expansion, sprites in front
+    ; player multicolor, obstacles hires
+    lda #5
+    sta VIC_SPR_MC1         ; multicolor 1 : green
+    lda #14
+    sta VIC_SPR_MC2         ; multicolor 2 : light blue
+    lda #%00000001
+    sta VIC_SPR_MCOL        ; sprite 0 multicolor, sprites 1-7 hires
+
+    ; no expansion, sprites in front
     lda #0
-    sta VIC_SPR_MCOL
     sta VIC_SPR_XEXP
     sta VIC_SPR_BPRI
 
@@ -176,6 +189,9 @@ start:
     sta zp_score_h
     sta zp_cool
     sta zp_snd
+    sta zp_bike_frame
+    lda #32
+    sta zp_anim
     lda #$a7
     sta zp_rand
 
@@ -215,6 +231,20 @@ main_loop:
     jmp main_loop
 
 .title:
+    dec zp_anim
+    bne .tjoy
+    lda #32
+    sta zp_anim
+    ldx zp_bike_frame
+    inx
+    cpx #3
+    bcc .tset
+    ldx #0
+.tset:
+    stx zp_bike_frame
+    lda bike_frames,x
+    sta SPR_PTR+0
+.tjoy:
     lda zp_joy
     and #%00010000          ; fire (active low)
     beq .start
@@ -244,6 +274,9 @@ start_game:
     lda #0
     sta zp_score_l
     sta zp_score_h
+
+    lda #$80                ; bike frame A
+    sta SPR_PTR+0
 
     lda #150
     sta zp_player_x
@@ -556,58 +589,41 @@ txt_again:   !text "FIRE TO RESTART"
              !byte 0
 
 ; ============================================================
+;  SPRITE POINTERS
+; ============================================================
+bike_frames:
+    !byte $80, $81, $82     ; bike frame A, frame B, jump
+
+; ============================================================
 ;  SPRITE DATA  (must live in VIC bank 0 RAM, not $1000-$1fff)
-;  Each sprite is 24x21 pixels = 63 bytes.
-;  Pad the output to $2000 so the sprite pointers $80/$81
-;  keep pointing at the right blocks.
+;  Each sprite is 24x21 pixels = 63 bytes plus one padding
+;  byte, so every image occupies a 64-byte block.
+;
+;  $2000  bike frame A   ptr $80
+;  $2040  bike frame B   ptr $81
+;  $2080  bike jump      ptr $82
+;
+;  The images are multicolor: 01 = $D025 (green),
+;  10 = $D027 (sprite colour), 11 = $D026 (light blue).
 ; ============================================================
 !fill $2000 - *, 0
 
 !pseudopc $2000 {
-spr_player:
-    !byte %00000000,%00000000,%00000000
-    !byte %00000000,%00011000,%00000000
-    !byte %00000000,%00011000,%00000000
-    !byte %00000000,%00111100,%00000000
-    !byte %00000000,%00111100,%00000000
-    !byte %00000000,%01111110,%00000000
-    !byte %00000000,%01111110,%00000000
-    !byte %00000000,%11111111,%00000000
-    !byte %00000001,%11111111,%10000000
-    !byte %00000011,%11111111,%11000000
-    !byte %00000111,%11111111,%11100000
-    !byte %00001111,%11111111,%11110000
-    !byte %00000111,%11111111,%11100000
-    !byte %00000011,%11111111,%11000000
-    !byte %00000001,%11111111,%10000000
-    !byte %00000000,%11111111,%00000000
-    !byte %00000000,%01111110,%00000000
-    !byte %00000000,%00111100,%00000000
-    !byte %00000000,%00011000,%00000000
-    !byte %00000000,%00000000,%00000000
-    !byte %00000000,%00000000,%00000000
-    !byte 0                     ; pad to 64-byte sprite block
+spr_bike_a:
+    !byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+    !byte $28,$00,$00,$2a,$00,$00,$3c,$00,$00,$3c,$00,$00,$3c,$00,$00,$f0
+    !byte $00,$00,$fc,$00,$00,$ff,$c0,$00,$f2,$80,$00,$f0,$80,$0a,$fa,$80
+    !byte $02,$30,$80,$0a,$30,$a0,$20,$be,$08,$20,$aa,$08,$0a,$00,$a0,$8b
 
-spr_enemy:
-    !byte %00000000,%00000000,%00000000
-    !byte %00000000,%00000000,%00000000
-    !byte %00000000,%00011000,%00000000
-    !byte %00000000,%00111100,%00000000
-    !byte %00000001,%01111110,%00000000
-    !byte %00000011,%11111111,%00000000
-    !byte %00000111,%11111111,%10000000
-    !byte %00001111,%11111111,%11000000
-    !byte %00001111,%11111111,%11000000
-    !byte %00000111,%11111111,%10000000
-    !byte %00000011,%11111111,%00000000
-    !byte %00000001,%01111110,%00000000
-    !byte %00000000,%00111100,%00000000
-    !byte %00000000,%00011000,%00000000
-    !byte %00000000,%00000000,%00000000
-    !byte %00000000,%00000000,%00000000
-    !byte %00000000,%00000000,%00000000
-    !byte %00000000,%00000000,%00000000
-    !byte %00000000,%00000000,%00000000
-    !byte %00000000,%00000000,%00000000
-    !byte %00000000,%00000000,%00000000
+spr_bike_b:
+    !byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+    !byte $00,$00,$00,$00,$00,$00,$28,$00,$00,$2a,$00,$00,$fc,$00,$00,$fc
+    !byte $00,$03,$f0,$00,$03,$ff,$00,$03,$c2,$80,$03,$c0,$80,$0a,$fa,$80
+    !byte $02,$f0,$80,$0a,$30,$a0,$20,$b2,$08,$20,$be,$08,$0a,$00,$a0,$8b
+
+spr_bike_jump:
+    !byte $00,$a0,$00,$00,$a8,$00,$00,$f0,$00,$00,$f0,$00,$00,$c0,$00,$00
+    !byte $f0,$00,$00,$fc,$00,$00,$f3,$00,$00,$f2,$80,$00,$30,$80,$0a,$ba
+    !byte $80,$02,$30,$a0,$0a,$32,$08,$20,$be,$08,$20,$a8,$a0,$20,$80,$00
+    !byte $0a,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$8b
 }
