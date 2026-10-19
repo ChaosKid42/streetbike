@@ -5,15 +5,18 @@
 ;  Build     : ninja                 (acme -> build\streetbike.prg)
 ;  Run       : x64sc build\streetbike.prg
 ;  Controls  : Joystick in port 2
-;              left / right = move, fire = start / restart
+;              left / right = move along the street
+;              up / down    = change lane
+;              fire         = jump / start / restart
 ;
 ;  The program takes over the machine: it disables interrupts,
 ;  owns the VIC-II sprites and runs its own frame loop.
 ;
 ;  Phase 0 renamed the project and its build outputs. Phase 1
-;  replaced the sprite data with the supplied bike images. The
-;  original asteroid gameplay is still present; see PLAN.md for
-;  the bike-game refactor.
+;  replaced the sprite data with the supplied bike images.
+;  Phase 2 adds bike movement, pedalling animation and jumping.
+;  The scrolling street, obstacles, scoring and lives follow in
+;  later phases; see PLAN.md.
 ; ============================================================
 
 ; The C64's 6510 is a 6502 core with an added I/O port at $00/$01; its
@@ -27,6 +30,7 @@
 ; ------------------------------------------------------------
 VIC_SPR0_X   = $d000
 VIC_SPR0_Y   = $d001
+VIC_SPR_XHI  = $d010        ; 9th X bit for sprites 0-7
 VIC_SPR_ENA  = $d015
 VIC_SPR_BPRI = $d01b
 VIC_SPR_MCOL = $d01c
@@ -54,30 +58,45 @@ COLOR        = $d800
 SPR_PTR      = $07f8        ; sprite pointers (outside 40x25 matrix)
 
 ; ------------------------------------------------------------
-;  Zero page variables
+;  Zero page variables  (see PLAN.md section 3.4)
 ; ------------------------------------------------------------
-zp_player_x  = $02
-zp_player_y  = $03
-zp_score_l   = $04          ; BCD : tens / units
-zp_score_h   = $05          ; BCD : thousands / hundreds
-zp_rand      = $06
-zp_state     = $07          ; 0 title, 1 play, 2 game over
-zp_src       = $08          ; 2 bytes, string pointer
-zp_dst       = $0a          ; 2 bytes, screen pointer
-zp_joy       = $0c
-zp_cool      = $0d          ; game-over restart delay
-zp_snd       = $0e          ; sound countdown
-zp_anim      = $0f          ; title-screen image countdown (temporary)
-zp_enemy_x   = $10          ; 4 bytes
-zp_enemy_y   = $14          ; 4 bytes
-zp_enemy_spd = $18          ; 4 bytes
-zp_bike_frame = $1c         ; title-screen bike image index (temporary)
+zp_player_x   = $02
+zp_player_y   = $03         ; base (ground) Y; jump lift is subtracted
+zp_jump_t     = $04         ; jump animation index, 0 = grounded
+zp_jump_lift  = $05         ; current lift in pixels
+zp_anim       = $06         ; pedalling animation counter
+zp_bike_frame = $07         ; 0 / 1 pedalling frame
+zp_state      = $08         ; 0 title, 1 play, 2 game over
+zp_score_l    = $09         ; BCD : tens / units
+zp_score_h    = $0a         ; BCD : thousands / hundreds
+zp_lives      = $0b
+zp_inv        = $0c         ; invulnerability countdown
+zp_fire_prev  = $0d         ; previous fire state (edge detect)
+zp_joy        = $0e
+zp_cool       = $0f         ; game-over restart delay
+zp_snd        = $10         ; sound countdown
+zp_rand       = $11
+zp_fine       = $12         ; fine scroll value (0-7)
+zp_col        = $13         ; world column counter
+zp_spawn      = $14         ; obstacle spawn timer
+zp_speed      = $15         ; world scroll speed (px/frame)
+zp_frame      = $16         ; frame counter
+zp_src        = $17         ; 2 bytes, string pointer
+zp_dst        = $19         ; 2 bytes, screen pointer
+zp_obs_x_lo   = $1b         ; 6 bytes
+zp_obs_x_hi   = $21         ; 6 bytes
+zp_obs_y      = $27         ; 6 bytes
+zp_obs_type   = $2d         ; 6 bytes
+zp_obs_active = $33         ; 6 bytes
+zp_obs_scored = $39         ; 6 bytes
+zp_tmp        = $3f         ; scratch
 
-PLAYER_Y     = 220
-PLAYER_MIN_X = 24
-PLAYER_MAX_X = 248
-ENEMY_TOP_Y  = 50
-ENEMY_BOT_Y  = 240
+PLAYER_MIN_X = 40
+PLAYER_MAX_X = 120
+PLAYER_MIN_Y = 96
+PLAYER_MAX_Y = 179
+PLAYER_SPEED = 2
+JUMP_FRAMES  = 16
 
 ; ------------------------------------------------------------
 ;  Macro: print a zero-terminated string at a screen address
@@ -128,36 +147,27 @@ start:
     lda #$00
     sta CIA1_DDRA           ; joystick port 2 = input
 
-    lda #7                  ; border : yellow
+    lda #0                  ; border and background : black
     sta VIC_BORDER
-    lda #0
     sta VIC_BG
 
     lda #$15                ; screen $0400, uppercase/graphics charset $1000
     sta $d018
 
-    jsr clear_screen
-
-    lda #1
-    jsr fill_color
+    jsr draw_static_scene
 
     ; sprite data pointers -----------------------------------
+    ldx #0
     lda #$80                ; $2000 / 64 : bike frame A
-    sta SPR_PTR+0           ; sprite 0 : player
-    lda #$81                ; $2040 / 64 : bike frame B
-    sta SPR_PTR+1           ; sprites 1-4 : placeholder until
-    sta SPR_PTR+2           ; obstacle sprites exist (Phase 4)
-    sta SPR_PTR+3
-    sta SPR_PTR+4
+.sp_ptr:
+    sta SPR_PTR,x
+    inx
+    cpx #8
+    bne .sp_ptr
 
     ; sprite colours -----------------------------------------
     lda #1
     sta VIC_SPR0_COL        ; player : white
-    lda #2
-    sta VIC_SPR0_COL+1
-    sta VIC_SPR0_COL+2
-    sta VIC_SPR0_COL+3
-    sta VIC_SPR0_COL+4      ; enemies : red
 
     ; player multicolor, obstacles hires
     lda #5
@@ -175,25 +185,30 @@ start:
     lda #%00000001          ; title screen : only player visible
     sta VIC_SPR_ENA
 
-    ; reset player
-    lda #150
-    sta zp_player_x
-    lda #PLAYER_Y
-    sta zp_player_y
-    jsr write_player
-
-    ; reset state
+    ; reset state --------------------------------------------
     lda #0
     sta zp_state
     sta zp_score_l
     sta zp_score_h
     sta zp_cool
     sta zp_snd
+    sta zp_jump_t
+    sta zp_jump_lift
     sta zp_bike_frame
-    lda #32
+    sta zp_fire_prev
+    sta zp_inv
+    lda #4
     sta zp_anim
+    lda #3
+    sta zp_lives
     lda #$a7
     sta zp_rand
+
+    lda #80
+    sta zp_player_x
+    lda #160
+    sta zp_player_y
+    jsr write_player
 
     ; title text
     +print_at SCREEN+10*40+13, txt_title
@@ -206,14 +221,7 @@ start:
 main_loop:
     jsr wait_frame
     jsr read_joystick
-
-    lda zp_snd               ; sound envelope countdown
-    beq .nosnd
-    dec zp_snd
-    bne .nosnd
-    lda #0
-    sta SID_V1_CTRL
-.nosnd:
+    jsr update_sound
 
     lda zp_state
     cmp #1
@@ -224,27 +232,15 @@ main_loop:
 
 .playing:
     jsr move_player
-    jsr update_enemies
-    jsr check_collision
-    jsr write_sprites
+    jsr update_jump
+    jsr animate_bike
+    jsr write_player
     jsr draw_score
     jmp main_loop
 
 .title:
-    dec zp_anim
-    bne .tjoy
-    lda #32
-    sta zp_anim
-    ldx zp_bike_frame
-    inx
-    cpx #3
-    bcc .tset
-    ldx #0
-.tset:
-    stx zp_bike_frame
-    lda bike_frames,x
-    sta SPR_PTR+0
-.tjoy:
+    jsr animate_bike
+    jsr write_player
     lda zp_joy
     and #%00010000          ; fire (active low)
     beq .start
@@ -274,41 +270,32 @@ start_game:
     lda #0
     sta zp_score_l
     sta zp_score_h
+    sta zp_jump_t
+    sta zp_jump_lift
+    sta zp_bike_frame
+    sta zp_inv
+    sta zp_cool
+    lda #4
+    sta zp_anim
+    lda #3
+    sta zp_lives
+    lda #1
+    sta zp_fire_prev        ; fire is still held when the game starts
 
-    lda #$80                ; bike frame A
-    sta SPR_PTR+0
-
-    lda #150
+    lda #80
     sta zp_player_x
-    lda #PLAYER_Y
+    lda #160
     sta zp_player_y
 
-    ldx #0
-.sg_en:
-    lda #ENEMY_TOP_Y
-    sta zp_enemy_y,x
-    jsr rand_byte
-    and #$df
-    clc
-    adc #24
-    sta zp_enemy_x,x
-    lda #1
-    sta zp_enemy_spd,x
-    inx
-    cpx #4
-    bne .sg_en
-
-    lda #%00011111          ; enable player + 4 enemies
+    lda #%00000001          ; only the player sprite for now
     sta VIC_SPR_ENA
 
-    jsr clear_screen
+    jsr draw_static_scene
     +print_at SCREEN+1*40+0, txt_score
 
     lda #1
     sta zp_state
-    lda #0
-    sta zp_cool
-    jsr write_sprites
+    jsr write_player
     jsr draw_score
     rts
 
@@ -320,13 +307,44 @@ read_joystick:
     sta zp_joy
     rts
 
+; Up/down move the bike across the road; left/right along it.
+; Up/down are ignored while airborne.
 move_player:
+    lda zp_jump_t
+    bne .horizontal
+
+    lda zp_joy
+    and #%00000001          ; up
+    bne .no_up
+    lda zp_player_y
+    sec
+    sbc #PLAYER_SPEED
+    cmp #PLAYER_MIN_Y
+    bcs .su
+    lda #PLAYER_MIN_Y
+.su:
+    sta zp_player_y
+.no_up:
+    lda zp_joy
+    and #%00000010          ; down
+    bne .no_down
+    lda zp_player_y
+    clc
+    adc #PLAYER_SPEED
+    cmp #PLAYER_MAX_Y+1
+    bcc .sd
+    lda #PLAYER_MAX_Y
+.sd:
+    sta zp_player_y
+.no_down:
+
+.horizontal:
     lda zp_joy
     and #%00000100          ; left
     bne .no_left
     lda zp_player_x
     sec
-    sbc #3
+    sbc #PLAYER_SPEED
     cmp #PLAYER_MIN_X
     bcs .sl
     lda #PLAYER_MIN_X
@@ -338,8 +356,8 @@ move_player:
     bne .no_right
     lda zp_player_x
     clc
-    adc #3
-    cmp #PLAYER_MAX_X
+    adc #PLAYER_SPEED
+    cmp #PLAYER_MAX_X+1
     bcc .sr
     lda #PLAYER_MAX_X
 .sr:
@@ -347,88 +365,99 @@ move_player:
 .no_right:
     rts
 
-write_player:
-    lda zp_player_x
-    sta VIC_SPR0_X
-    lda zp_player_y
-    sta VIC_SPR0_Y
+; Fire starts a jump. The button is edge-detected so holding it
+; does not repeat, and an airborne bike cannot jump again.
+update_jump:
+    lda zp_joy
+    and #%00010000          ; fire (active low)
+    beq .pressed
+    lda #0
+    sta zp_fire_prev
+    jmp .advance
+.pressed:
+    lda zp_fire_prev
+    bne .advance
+    lda #1
+    sta zp_fire_prev
+    lda zp_jump_t
+    bne .advance            ; no double jump
+    lda #1
+    sta zp_jump_t
+.advance:
+    lda zp_jump_t
+    beq .uj_done
+    tax
+    lda jump_lift,x
+    sta zp_jump_lift
+    inc zp_jump_t
+    lda zp_jump_t
+    cmp #JUMP_FRAMES
+    bcc .uj_done
+    lda #0
+    sta zp_jump_t
+    sta zp_jump_lift
+.uj_done:
     rts
 
-; ============================================================
-;  ENEMIES
-; ============================================================
-update_enemies:
-    ldx #0
-.ue:
-    lda zp_enemy_y,x
-    clc
-    adc zp_enemy_spd,x
-    sta zp_enemy_y,x
-    cmp #ENEMY_BOT_Y
-    bcc .unext
-    jsr spawn_enemy
-    jsr add_score
-.unext:
-    inx
-    cpx #4
-    bne .ue
-    rts
-
-; respawn enemy X at the top with a new position & speed
-spawn_enemy:
-    lda #ENEMY_TOP_Y
-    sta zp_enemy_y,x
-    jsr rand_byte
-    and #$df
-    clc
-    adc #24
-    sta zp_enemy_x,x
-    lda zp_score_h          ; difficulty from hundreds digit
-    and #$0f
-    lsr
-    clc
-    adc #1
-    cmp #4
-    bcc .sp
+; Toggle the pedalling frame every 4 frames while grounded.
+animate_bike:
+    lda zp_jump_t
+    bne .ab_done
+    dec zp_anim
+    bne .ab_done
     lda #4
-.sp:
-    sta zp_enemy_spd,x
+    sta zp_anim
+    lda zp_bike_frame
+    eor #1
+    sta zp_bike_frame
+.ab_done:
     rts
 
-write_sprites:
+write_player:
+    lda zp_jump_t
+    beq .grounded
+    lda #$82                ; jump pose
+    jmp .ptr
+.grounded:
+    ldx zp_bike_frame
+    lda bike_frames,x
+.ptr:
+    sta SPR_PTR+0
+
     lda zp_player_x
-    sta VIC_SPR0_X
+    ldx #0                  ; sprite 0
+    clc                     ; X < 256
+    jsr set_sprite_x
+
     lda zp_player_y
+    sec
+    sbc zp_jump_lift
     sta VIC_SPR0_Y
-    ldx #0
-.ws:
+    rts
+
+; X = sprite index 0-7, A = X low byte, carry = 9th X bit.
+set_sprite_x:
+    sta zp_tmp
+    bcc .clear
+    txa
+    tay
+    lda sprite_bit,y
+    ora VIC_SPR_XHI
+    sta VIC_SPR_XHI
+    jmp .store
+.clear:
+    txa
+    tay
+    lda sprite_bit,y
+    eor #$ff
+    and VIC_SPR_XHI
+    sta VIC_SPR_XHI
+.store:
     txa
     asl
-    tay
-    lda zp_enemy_x,x
-    sta VIC_SPR0_X+2,y      ; sprite (x+1) X
-    lda zp_enemy_y,x
-    sta VIC_SPR0_X+3,y      ; sprite (x+1) Y
-    inx
-    cpx #4
-    bne .ws
-    rts
-
-; ============================================================
-;  COLLISION  (VIC-II sprite/sprite register)
-; ============================================================
-check_collision:
-    lda VIC_SPR_COLL        ; reading clears the latch
-    and #%00000001          ; did sprite 0 (player) hit anything?
-    beq .cc_ok
-    lda #2
-    sta zp_state
-    lda #50
-    sta zp_cool
-    jsr beep_hit
-    +print_at SCREEN+12*40+15, txt_over
-    +print_at SCREEN+16*40+12, txt_again
-.cc_ok:
+    tax
+    lda zp_tmp
+    sta VIC_SPR0_X,x
     rts
 
 ; ============================================================
@@ -493,6 +522,16 @@ beep_hit:
     sta zp_snd
     rts
 
+update_sound:
+    lda zp_snd
+    beq .us_done
+    dec zp_snd
+    bne .us_done
+    lda #0
+    sta SID_V1_CTRL
+.us_done:
+    rts
+
 ; ============================================================
 ;  FRAME SYNC  (wait for raster line 250)
 ; ============================================================
@@ -536,6 +575,67 @@ print:
     rts
 
 ; ============================================================
+;  STATIC SCENE  (placeholder until Phase 3 scrolling)
+; ============================================================
+draw_static_scene:
+    jsr clear_screen
+
+    ; rows 12-24 : solid road blocks
+    lda #<SCREEN+12*40
+    sta zp_dst
+    lda #>SCREEN+12*40
+    sta zp_dst+1
+    ldx #0
+.ds_row:
+    ldy #0
+    lda #160                ; reverse space = solid block
+.ds_cell:
+    sta (zp_dst),y
+    iny
+    cpy #40
+    bne .ds_cell
+    lda zp_dst
+    clc
+    adc #40
+    sta zp_dst
+    bcc .ds_noc
+    inc zp_dst+1
+.ds_noc:
+    inx
+    cpx #13
+    bne .ds_row
+
+    jsr set_row_colors
+    rts
+
+; Colour RAM is set per row; the road blocks use the grey nibble.
+set_row_colors:
+    lda #<COLOR
+    sta zp_dst
+    lda #>COLOR
+    sta zp_dst+1
+    ldx #0
+.sc_row:
+    lda row_colors,x
+    ldy #0
+.sc_cell:
+    sta (zp_dst),y
+    iny
+    cpy #40
+    bne .sc_cell
+    lda zp_dst
+    clc
+    adc #40
+    sta zp_dst
+    bcc .sc_noc
+    inc zp_dst+1
+.sc_noc:
+    inx
+    cpx #25
+    bne .sc_row
+    rts
+
+; ============================================================
 ;  CLEAR SCREEN  (1000 bytes, leaves sprite pointers alone)
 ; ============================================================
 clear_screen:
@@ -555,23 +655,6 @@ clear_screen:
     bne .cs2
     rts
 
-; fill colour RAM with the colour already in A
-fill_color:
-    ldx #0
-.fc1:
-    sta COLOR,x
-    sta COLOR+$100,x
-    sta COLOR+$200,x
-    inx
-    bne .fc1
-    ldx #0
-.fc2:
-    sta COLOR+$300,x
-    inx
-    cpx #232
-    bne .fc2
-    rts
-
 ; ============================================================
 ;  TEXT
 ; ============================================================
@@ -589,10 +672,21 @@ txt_again:   !text "FIRE TO RESTART"
              !byte 0
 
 ; ============================================================
-;  SPRITE POINTERS
+;  TABLES
 ; ============================================================
 bike_frames:
-    !byte $80, $81, $82     ; bike frame A, frame B, jump
+    !byte $80, $81          ; pedalling frames A and B
+
+jump_lift:
+    !byte 0,4,8,12,16,20,24,28,28,24,20,16,12,8,4,0
+
+sprite_bit:
+    !byte 1,2,4,8,16,32,64,128
+
+row_colors:
+    !byte 1,1               ; rows 0-1  HUD
+    !byte 0,0,0,0,0,0,0,0,0,0   ; rows 2-11 sky
+    !byte 12,12,12,12,12,12,12,12,12,12,12,12,12  ; rows 12-24 road
 
 ; ============================================================
 ;  SPRITE DATA  (must live in VIC bank 0 RAM, not $1000-$1fff)

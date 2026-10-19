@@ -258,6 +258,8 @@ three images can be displayed without corruption.
 
 ### Phase 2 — Player, movement and jump
 
+**Status: complete.**
+
 1. Replace the asteroid player logic with the bike:
    - `zp_player_x` / `zp_player_y` with clamping to `40..120` and `96..179`.
    - Up/down/left/right movement at 2 px/frame.
