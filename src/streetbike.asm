@@ -94,9 +94,9 @@ zp_tmp        = $3f         ; scratch / low byte of temp pointer
 zp_tmp2       = $40         ; high byte of temp pointer
 
 PLAYER_MIN_X = 40
-PLAYER_MAX_X = 120
-PLAYER_MIN_Y = 96
-PLAYER_MAX_Y = 179
+PLAYER_MAX_X = 224
+PLAYER_MIN_Y = 128
+PLAYER_MAX_Y = 224
 PLAYER_SPEED = 2
 JUMP_FRAMES  = 16
 
@@ -440,7 +440,7 @@ write_player:
 
     lda zp_player_y
     sec
-    sbc zp_jump_lift
+    sbc zp_jump_lift        ; constant lift, independent of ground Y
     sta VIC_SPR0_Y
     rts
 
