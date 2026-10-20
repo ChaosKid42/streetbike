@@ -117,3 +117,21 @@ multicolor; the title screen cycles through the three bike images.
 * Save a high score in a spare byte and show it on the title screen.
 
 Have fun hacking on it — the whole game is one commented file.
+
+## Credits
+
+**Author:** Christoph Scholz <christoph.scholz@gmail.com>
+
+Streetbike was created with intensive use of AI. The code was written in
+close collaboration with AI coding agents (Zed's agent, powered by DeepSeek
+V4.1 Flash), with the human author directing the design, reviewing the
+changes and testing the game.
+
+**Bike animations:** Oliver Stephan <contact@creaturelab3d.com>
+
+* Website: <https://www.creaturelab3d.com/>
+* itch.io: <https://o-ossel.itch.io/>
+
+## License
+
+Released under the [MIT License](LICENSE) — see `LICENSE` for the full text.
