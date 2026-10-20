@@ -285,6 +285,8 @@ jumps with the jump sprite, lands cleanly, and cannot double-jump.
 
 #### 3a. Coarse scroll (baseline)
 
+**Status: complete.**
+
 1. Add `draw_background`:
    - Fill rows 2–5 with spaces (sky).
    - Draw a skyline in rows 6–11 from a building-height table.

@@ -15,8 +15,9 @@
 ;  Phase 0 renamed the project and its build outputs. Phase 1
 ;  replaced the sprite data with the supplied bike images.
 ;  Phase 2 adds bike movement, pedalling animation and jumping.
-;  The scrolling street, obstacles, scoring and lives follow in
-;  later phases; see PLAN.md.
+;  Phase 3a adds the scrolling street background.
+;  Obstacles, scoring and lives follow in later phases; see
+;  PLAN.md.
 ; ============================================================
 
 ; The C64's 6510 is a 6502 core with an added I/O port at $00/$01; its
@@ -89,7 +90,8 @@ zp_obs_y      = $27         ; 6 bytes
 zp_obs_type   = $2d         ; 6 bytes
 zp_obs_active = $33         ; 6 bytes
 zp_obs_scored = $39         ; 6 bytes
-zp_tmp        = $3f         ; scratch
+zp_tmp        = $3f         ; scratch / low byte of temp pointer
+zp_tmp2       = $40         ; high byte of temp pointer
 
 PLAYER_MIN_X = 40
 PLAYER_MAX_X = 120
@@ -154,7 +156,7 @@ start:
     lda #$15                ; screen $0400, uppercase/graphics charset $1000
     sta $d018
 
-    jsr draw_static_scene
+    jsr draw_background
 
     ; sprite data pointers -----------------------------------
     ldx #0
@@ -197,6 +199,9 @@ start:
     sta zp_bike_frame
     sta zp_fire_prev
     sta zp_inv
+    sta zp_frame
+    lda #1
+    sta zp_speed
     lda #4
     sta zp_anim
     lda #3
@@ -234,6 +239,7 @@ main_loop:
     jsr move_player
     jsr update_jump
     jsr animate_bike
+    jsr update_scroll
     jsr write_player
     jsr draw_score
     jmp main_loop
@@ -275,6 +281,9 @@ start_game:
     sta zp_bike_frame
     sta zp_inv
     sta zp_cool
+    sta zp_frame
+    lda #1
+    sta zp_speed
     lda #4
     sta zp_anim
     lda #3
@@ -290,7 +299,7 @@ start_game:
     lda #%00000001          ; only the player sprite for now
     sta VIC_SPR_ENA
 
-    jsr draw_static_scene
+    jsr draw_background
     +print_at SCREEN+1*40+0, txt_score
 
     lda #1
@@ -557,6 +566,12 @@ rand_byte:
 ;  PRINT  (ASCII/PETSCII -> screen codes, uppercase only)
 ; ============================================================
 print:
+    lda zp_dst
+    sta zp_tmp
+    lda zp_dst+1
+    clc
+    adc #$d4                ; COLOR - SCREEN
+    sta zp_tmp2
     ldy #0
 .pl:
     lda (zp_src),y
@@ -569,43 +584,180 @@ print:
     sbc #$40                ; A-Z -> screen codes 1..26
 .ps:
     sta (zp_dst),y
+    lda #1                  ; white text
+    sta (zp_tmp),y
     iny
     bne .pl
 .pd:
     rts
 
 ; ============================================================
-;  STATIC SCENE  (placeholder until Phase 3 scrolling)
+;  BACKGROUND  (Phase 3a: coarse scrolling street)
+;
+;  Rows 2-5   sky (black)
+;  Rows 6-11  skyline, height from building_heights
+;  Rows 12-24 road, checkerboard texture and lane dashes
+;  Rows 0-1   HUD, never scrolled
 ; ============================================================
-draw_static_scene:
-    jsr clear_screen
 
-    ; rows 12-24 : solid road blocks
-    lda #<SCREEN+12*40
-    sta zp_dst
-    lda #>SCREEN+12*40
-    sta zp_dst+1
+; Draw the complete background and reset the world column counter.
+draw_background:
+    jsr clear_screen
+    lda #0
+    sta zp_col
     ldx #0
-.ds_row:
+.db_col:
+    jsr draw_column
+    inc zp_col
+    inx
+    cpx #40
+    bne .db_col
+    jsr set_row_colors
+    rts
+
+; Draw one screen column. X = screen column 0-39, zp_col = world
+; column used for the skyline height and the lane-dash pattern.
+; Only rows 2-24 are touched, so the HUD stays fixed.
+draw_column:
+    stx zp_tmp              ; screen column
+    txa
+    pha                     ; preserve the caller's screen column
+    lda #<SCREEN+2*40
+    clc
+    adc zp_tmp
+    sta zp_dst
+    lda #>SCREEN+2*40
+    adc #0
+    sta zp_dst+1
+
+    lda zp_col
+    and #$3f
+    tax
+    lda building_heights,x
+    sta zp_tmp              ; building height 0-6
+
+    ldx #2                  ; screen row 2
+.dc_row:
+    cpx #6
+    bcc .dc_sky             ; rows 2-5 : sky
+    cpx #12
+    bcs .dc_road            ; rows 12-24 : road
+    txa                     ; rows 6-11 : skyline
+    clc
+    adc zp_tmp
+    cmp #12
+    bcc .dc_sky
+    lda #160                ; solid block : building
+    jmp .dc_store
+.dc_sky:
+    lda #32                 ; space
+    jmp .dc_store
+.dc_road:
+    cpx #17
+    bne .dc_dither
+    lda zp_col
+    and #$03
+    cmp #2
+    bcs .dc_dither
+    lda #160                ; lane dash
+    jmp .dc_store
+.dc_dither:
+    lda #102                ; checkerboard road texture
+.dc_store:
     ldy #0
-    lda #160                ; reverse space = solid block
-.ds_cell:
     sta (zp_dst),y
-    iny
-    cpy #40
-    bne .ds_cell
     lda zp_dst
     clc
     adc #40
     sta zp_dst
-    bcc .ds_noc
+    bcc .dc_noc
     inc zp_dst+1
-.ds_noc:
+.dc_noc:
     inx
-    cpx #13
-    bne .ds_row
+    cpx #25
+    bne .dc_row
+    pla
+    tax
+    rts
 
-    jsr set_row_colors
+; Shift rows 6-24 one character to the left. The sky rows 2-5
+; are always blank, so they do not need to be shifted. Column 39
+; is left for draw_column to fill with the new world column.
+shift_rows:
+    lda #<SCREEN+6*40
+    sta zp_dst
+    lda #>SCREEN+6*40
+    sta zp_dst+1
+    ldx #19                 ; rows 6-24
+.sr_row:
+    lda zp_dst
+    clc
+    adc #1
+    sta zp_src
+    lda zp_dst+1
+    adc #0
+    sta zp_src+1
+    ldy #0
+.sr_byte:
+    lda (zp_src),y
+    sta (zp_dst),y
+    iny
+    lda (zp_src),y
+    sta (zp_dst),y
+    iny
+    lda (zp_src),y
+    sta (zp_dst),y
+    iny
+    lda (zp_src),y
+    sta (zp_dst),y
+    iny
+    lda (zp_src),y
+    sta (zp_dst),y
+    iny
+    lda (zp_src),y
+    sta (zp_dst),y
+    iny
+    lda (zp_src),y
+    sta (zp_dst),y
+    iny
+    lda (zp_src),y
+    sta (zp_dst),y
+    iny
+    cpy #40
+    bne .sr_byte
+    lda zp_dst
+    clc
+    adc #40
+    sta zp_dst
+    bcc .sr_noc
+    inc zp_dst+1
+.sr_noc:
+    dex
+    bne .sr_row
+    rts
+
+; Shift the street left and append the next world column.
+scroll_background:
+    jsr shift_rows
+    ldx #39
+    jsr draw_column
+    inc zp_col
+    rts
+
+; Advance the coarse scroll accumulator by zp_speed pixels. Every
+; time it reaches one character (8 pixels) the screen is shifted.
+update_scroll:
+    lda zp_frame
+    clc
+    adc zp_speed
+    sta zp_frame
+    cmp #8
+    bcc .usc_done
+    sec
+    sbc #8
+    sta zp_frame
+    jsr scroll_background
+.usc_done:
     rts
 
 ; Colour RAM is set per row; the road blocks use the grey nibble.
@@ -683,9 +835,16 @@ jump_lift:
 sprite_bit:
     !byte 1,2,4,8,16,32,64,128
 
+building_heights:
+    !byte 3,5,2,6,4,0,3,5,2,4,6,3,1,2,5,4
+    !byte 6,2,3,0,4,5,2,6,3,4,1,5,2,3,6,4
+    !byte 2,5,1,4,3,6,2,3,5,0,4,2,6,3,1,5
+    !byte 4,2,6,3,1,5,4,2,3,6,1,4,5,2,3,0
+
 row_colors:
     !byte 1,1               ; rows 0-1  HUD
-    !byte 0,0,0,0,0,0,0,0,0,0   ; rows 2-11 sky
+    !byte 0,0,0,0           ; rows 2-5  sky
+    !byte 6,6,6,6,6,6       ; rows 6-11 skyline
     !byte 12,12,12,12,12,12,12,12,12,12,12,12,12  ; rows 12-24 road
 
 ; ============================================================
