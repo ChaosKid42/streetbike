@@ -15,7 +15,9 @@
 ;  Phase 0 renamed the project and its build outputs. Phase 1
 ;  replaced the sprite data with the supplied bike images.
 ;  Phase 2 adds bike movement, pedalling animation and jumping.
-;  Phase 3a adds the scrolling street background.
+;  Phase 3a adds the scrolling street background. Phase 3b
+;  scrolls it at pixel granularity with the $D016 fine scroll.
+;  Phase 3c adds a raster split so the HUD rows stay still.
 ;  Obstacles, scoring and lives follow in later phases; see
 ;  PLAN.md.
 ; ============================================================
@@ -43,6 +45,10 @@ VIC_SPR0_COL = $d027
 VIC_RASTER   = $d012
 VIC_BORDER   = $d020
 VIC_BG       = $d021
+VIC_CTRL1    = $d011        ; bit 7 : raster compare MSB
+VIC_CTRL2    = $d016        ; bits 0-2 : horizontal fine scroll, bit 3 : 40 columns
+VIC_IRQ      = $d019        ; interrupt status (write 1 to acknowledge)
+VIC_IRQ_ENA  = $d01a        ; bit 0 : raster interrupt enable
 
 CIA1_PA      = $dc00
 CIA1_DDRA    = $dc02
@@ -100,6 +106,13 @@ PLAYER_MAX_Y = 224
 PLAYER_SPEED = 2
 JUMP_FRAMES  = 16
 
+; Raster split lines (PAL). Row 0 starts on line 51 and row 2 on
+; line 67; both are bad lines, so the interrupts are placed on the
+; lines just before/inside them where a mid-line write cannot show:
+; line 50 is still top border, line 68 is inside the blank sky row.
+IRQ_LINE_HUD  = 50          ; $D016 fine scroll = 0 for rows 0-1
+IRQ_LINE_PLAY = 68          ; $D016 fine scroll = zp_fine below
+
 ; ------------------------------------------------------------
 ;  Macro: print a zero-terminated string at a screen address
 ;  Must be defined before it is used.
@@ -144,7 +157,21 @@ start:
     lda $dd0d
 
     lda #0
-    sta $d01a               ; disable VIC raster interrupts too
+    sta VIC_IRQ_ENA         ; disable VIC raster interrupts for now
+
+    ; Bank out BASIC and KERNAL so the CPU vectors at $FFFA-$FFFF
+    ; are RAM and can point straight at our handlers. I/O stays
+    ; mapped at $D000-$DFFF. Nothing here uses the ROMs.
+    lda #$35
+    sta $01
+    lda #<nmi_handler
+    sta $fffa
+    lda #>nmi_handler
+    sta $fffb
+    lda #<irq_hud
+    sta $fffe
+    lda #>irq_hud
+    sta $ffff
 
     lda #$00
     sta CIA1_DDRA           ; joystick port 2 = input
@@ -200,6 +227,7 @@ start:
     sta zp_fire_prev
     sta zp_inv
     sta zp_frame
+    sta zp_fine
     lda #1
     sta zp_speed
     lda #4
@@ -220,6 +248,18 @@ start:
     +print_at SCREEN+14*40+11, txt_press
     +print_at SCREEN+16*40+12, txt_joy
 
+    ; raster split -------------------------------------------
+    lda #$1b                ; screen on, 25 rows, Y scroll 3, raster MSB 0
+    sta VIC_CTRL1
+    lda #%11001000          ; 40 columns, no fine scroll (bits 6-7 read as 1)
+    sta VIC_CTRL2
+    lda #IRQ_LINE_HUD
+    sta VIC_RASTER
+    lda #$01
+    sta VIC_IRQ             ; clear anything pending
+    sta VIC_IRQ_ENA         ; raster interrupt on
+    cli
+
 ; ============================================================
 ;  MAIN LOOP  (one iteration = one video frame)
 ; ============================================================
@@ -236,10 +276,10 @@ main_loop:
     jmp .title
 
 .playing:
+    jsr update_scroll       ; first: the coarse shift needs the whole vblank
     jsr move_player
     jsr update_jump
     jsr animate_bike
-    jsr update_scroll
     jsr write_player
     jsr draw_score
     jmp main_loop
@@ -282,6 +322,7 @@ start_game:
     sta zp_inv
     sta zp_cool
     sta zp_frame
+    sta zp_fine
     lda #1
     sta zp_speed
     lda #4
@@ -551,6 +592,58 @@ wait_frame:
     rts
 
 ; ============================================================
+;  RASTER SPLIT  (Phase 3c)
+;
+;  Two chained raster interrupts keep the HUD rows 0-1 free of
+;  the horizontal fine scroll. Each handler writes $D016, points
+;  the raster compare and the IRQ vector at the other handler and
+;  acknowledges the VIC. Only A is used, so only A is saved.
+;  The main loop no longer touches $D016; it just keeps zp_fine
+;  up to date and irq_play applies it once per frame.
+;
+;  The HUD rows use 40 columns so text at column 0 is fully
+;  visible. The scrolling rows use 38 columns: the side borders
+;  grow by one character and hide columns 0 and 39, which are
+;  only partially on screen while the fine scroll is non-zero.
+;  Without this the left edge of the street visibly slides and
+;  snaps back on every coarse shift.
+; ============================================================
+irq_hud:
+    pha
+    lda VIC_CTRL2
+    and #%11110000
+    ora #%00001000          ; rows 0-1 : 40 columns, no fine scroll
+    sta VIC_CTRL2
+    lda #IRQ_LINE_PLAY
+    sta VIC_RASTER
+    lda #<irq_play
+    sta $fffe
+    lda #>irq_play
+    sta $ffff
+    lda #$01
+    sta VIC_IRQ
+    pla
+    rti
+
+irq_play:
+    pha
+    jsr write_fine_scroll   ; rows 2-24 : 38 columns, scroll by zp_fine
+    lda #IRQ_LINE_HUD
+    sta VIC_RASTER
+    lda #<irq_hud
+    sta $fffe
+    lda #>irq_hud
+    sta $ffff
+    lda #$01
+    sta VIC_IRQ
+    pla
+    rti
+
+; RESTORE key: with the KERNAL banked out the NMI vector is ours.
+nmi_handler:
+    rti
+
+; ============================================================
 ;  RANDOM  (8 bit LFSR)
 ; ============================================================
 rand_byte:
@@ -592,7 +685,7 @@ print:
     rts
 
 ; ============================================================
-;  BACKGROUND  (Phase 3a: coarse scrolling street)
+;  BACKGROUND  (Phase 3a-3c: coarse + fine scrolling street)
 ;
 ;  Rows 2-5   sky (black)
 ;  Rows 6-11  skyline, height from building_heights
@@ -744,20 +837,40 @@ scroll_background:
     inc zp_col
     rts
 
-; Advance the coarse scroll accumulator by zp_speed pixels. Every
-; time it reaches one character (8 pixels) the screen is shifted.
+; Advance the fine scroll by zp_speed pixels. $D016 shifts the
+; picture right by its low three bits, so the value counts down to
+; move the street left. When it would pass zero the screen is
+; shifted one character and the value wraps to 7, which keeps the
+; motion continuous across the coarse shift.
+;
+; Timing: the coarse shift takes ~170 raster lines, so it runs
+; past the top border and well into the next frame's picture. The
+; new zp_fine is picked up by irq_play on line 68, and the rows
+; are shifted top to bottom ahead of the beam: rows 6-11 are done
+; before line 99 and rows 12-24 before line 147. zp_fine must be
+; stored before the shift so the value and the memory agree when
+; the interrupt reads it.
 update_scroll:
-    lda zp_frame
-    clc
-    adc zp_speed
-    sta zp_frame
-    cmp #8
-    bcc .usc_done
+    lda zp_fine
     sec
-    sbc #8
-    sta zp_frame
-    jsr scroll_background
-.usc_done:
+    sbc zp_speed
+    bcs .usc_store
+    clc
+    adc #8
+    sta zp_fine
+    jmp scroll_background
+.usc_store:
+    sta zp_fine
+    rts
+
+; Apply zp_fine to $D016 and select 38-column mode, leaving the
+; other bits (reset, text multicolor) untouched. Called from
+; irq_play, so this is the mode for the scrolling rows only.
+write_fine_scroll:
+    lda VIC_CTRL2
+    and #%11110000
+    ora zp_fine
+    sta VIC_CTRL2
     rts
 
 ; Colour RAM is set per row; the road blocks use the grey nibble.

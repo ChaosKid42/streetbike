@@ -75,8 +75,9 @@ row  6-11   skyline / buildings (blue or dark grey)
 row 12-24   road surface + lane markings (grey)
 ```
 
-- HUD rows are never scrolled.
-- The scrolling area is rows 2–24 (23 rows).
+- HUD rows are never scrolled and use 40 columns.
+- The scrolling area is rows 2–24 (23 rows) and uses 38 columns: the side
+  borders cover columns 0 and 39, so the visible street is `x = 8..311`.
 - Road pixel range: `y = 96..199`.
 - Player sprite Y range: `96..179` (sprite is 21 px tall; content ends at
   `y + 20`).
@@ -199,13 +200,13 @@ Keep the existing three-state machine:
 ### 3.6 Frame loop
 
 ```
-wait for frame
+wait for frame (raster 250)
 read joystick
 update sound countdown
 switch on state:
   title:     animate bike, scroll background slowly, wait for fire
-  play:      update player (move, jump, animate)
-             update background scroll
+  play:      update background scroll   (first: the coarse shift is long)
+             update player (move, jump, animate)
              update obstacles (move, spawn, despawn)
              check collisions
              check jump-over bonuses
@@ -213,6 +214,9 @@ switch on state:
              write sprites (X/Y, pointers, enable mask, 9th X bit)
              update HUD
   game over: count down restart delay, wait for fire
+
+independently, raster IRQs on lines 50 and 68 write $D016 so the
+HUD rows 0-1 are unscrolled and rows 2-24 use zp_fine
 ```
 
 ---
@@ -303,21 +307,66 @@ jumps with the jump sprite, lands cleanly, and cannot double-jump.
 **Acceptance:** The street scrolls left smoothly enough to read, the HUD does
 not move, and the pattern repeats without gaps.
 
-#### 3b. Fine scroll (recommended polish)
+#### 3b. Fine scroll (HUD may wobble) — done
 
-1. Set up a raster split so the HUD is not affected by `$D016`:
-   - IRQ at the start of row 0 (raster line 51, PAL): `$D016` fine scroll = 0.
-   - IRQ at the start of row 2 (raster line 67, PAL): `$D016` fine scroll =
-     `zp_fine`.
-   - Use a small IRQ handler that saves registers, writes `$D016`,
-     acknowledges `$D019`, restores and returns. Chain the two lines: the
-     row-0 handler sets 0 and reprograms the raster compare to row 2; the
-     row-2 handler sets `zp_fine` and reprograms the compare back to row 0.
-2. Enable interrupts (`cli`) and keep the CIA interrupt sources disabled.
-3. Each frame, advance `zp_fine` by `zp_speed`; when it wraps past 7, reset it
-   and call `scroll_background`.
-4. Calibrate the scroll direction in VICE: if the screen moves the wrong way,
-   swap the shift direction and the new-column position.
+1. Write `zp_fine` to the low three bits of `$D016` once per frame, leaving
+   the other bits (screen enable, 38/40 columns) unchanged.
+2. Each frame, subtract `zp_speed` from `zp_fine`; `$D016` shifts the picture
+   right, so counting down moves the street left. When it would pass zero,
+   add 8 and call `scroll_background`, which keeps the motion continuous
+   across the coarse shift.
+3. Do **not** add a raster split yet. The fine scroll applies to the whole
+   screen, so the HUD rows 0–1 shift by up to 7 pixels as well. That is
+   acceptable at this stage; Phase 3c fixes it.
+
+Lessons from implementation:
+
+- `scroll_background` clobbers A. Store the wrapped `zp_fine` *before*
+  calling it, otherwise garbage lands in `zp_fine` and leaks into the upper
+  bits of `$D016` (multicolor text, 38-column mode).
+- The coarse shift takes about 170 raster lines, so starting from the
+  `wait_frame` sync at line 250 it finishes around line 120 of the *next*
+  frame, inside the skyline rows. Run `update_scroll` first in the play
+  branch and make the new fine value take effect before the beam reaches the
+  shifted rows; the rows are shifted top to bottom ahead of the beam.
+  Writing `$D016` after the shift makes the skyline stutter while the road
+  below looks fine.
+
+**Acceptance:** The background scrolls smoothly at pixel granularity and the
+screen shift happens without visible tearing. The HUD is allowed to jitter
+horizontally.
+
+#### 3c. HUD protection with a raster split — done
+
+1. Bank out BASIC and KERNAL (`$01 = $35`, I/O stays mapped) so the hardware
+   vectors at `$FFFA`–`$FFFF` are RAM, and point `$FFFE/$FFFF` at the IRQ
+   handler and `$FFFA/$FFFB` at a bare `rti` for RESTORE. This skips the
+   KERNAL dispatch and the `$0314` indirection entirely.
+2. Two chained raster interrupts own `$D016`:
+   - `irq_hud` on line 50 (PAL): fine scroll = 0 and 40 columns for rows
+     0–1, then reprogram the compare to line 68 and the vector to
+     `irq_play`.
+   - `irq_play` on line 68: fine scroll = `zp_fine` and 38 columns for rows
+     2–24, then reprogram the compare to line 50 and the vector to
+     `irq_hud`.
+   - Each handler saves only A, writes `$D016`, acknowledges `$D019` and
+     returns.
+   - Lines 50/68 rather than 51/67: rows 0 and 2 start on bad lines, where
+     a mid-line write could show as a seam. Line 50 is still top border and
+     line 68 is inside the always-blank sky row 2, so the write is never
+     visible.
+3. Enable interrupts (`cli`) with the CIA interrupt sources kept disabled.
+4. The main loop no longer writes `$D016`; `update_scroll` only maintains
+   `zp_fine` and `irq_play` applies it once per frame. `zp_fine` is still
+   stored before the coarse shift so the value and screen memory agree when
+   the interrupt reads it.
+5. 38-column mode for the scrolling rows. In 40-column mode the fine scroll
+   slides column 0 right by `zp_fine` pixels, exposing a 0–7 px strip of
+   background at the left edge that snaps back on every coarse shift. With
+   `$D016` bit 3 clear the side borders grow by one character and hide the
+   partially scrolled columns 0 and 39. The HUD keeps 40 columns so text at
+   column 0 stays fully visible; the raster split switches the mode along
+   with the fine scroll.
 
 **Acceptance:** The background scrolls smoothly at pixel granularity, the HUD
 stays perfectly still, and the screen shift happens without visible tearing.
@@ -400,7 +449,7 @@ bonus points, the HUD updates correctly, and the game visibly speeds up.
    - Optional: a low engine tone on SID voice 2 whose frequency follows
      `zp_speed`.
 4. Optional polish:
-   - Fine scroll (Phase 3b) if not already done.
+   - Fine scroll and HUD raster split (Phases 3b–3c) if not already done.
    - A second obstacle sprite for wide obstacles (e.g., a car).
    - A high-score byte shown on the title screen.
 
@@ -456,8 +505,9 @@ Design notes:
    example x = 64) instead of entering from the right edge.
 2. **Sprite alignment.** Every sprite block must be 64-byte aligned; the
    pointer is `address / 64`. Do not place sprite data in `$1000–$1FFF`.
-3. **Screen shift vs. HUD.** Shift only rows 2–24. If fine scroll is used, a
-   raster split is required to keep rows 0–1 still.
+3. **Screen shift vs. HUD.** Shift only rows 2–24. The raster split in
+   Phase 3c keeps rows 0–1 free of the fine scroll; `$D016` belongs to the
+   IRQ handlers, so do not write it from the main loop.
 4. **Colour RAM.** Use row-based colours so colour RAM does not need to be
    shifted with the screen. If per-cell colours are introduced later, shift
    colour RAM too.
@@ -475,11 +525,23 @@ Design notes:
 9. **ACME syntax.** Convert SpritePad's `.byte` to `!byte` and remove the
    `* = addr_spriteset_*` directives. The `!fill $2000 - *, 0` will fail the
    build if the code grows past `$2000`.
-10. **Frame budget.** The screen shift is the most expensive routine. Shift
-    only when the fine scroll wraps (every 4–8 frames), not every frame.
-11. **Raster split timing.** If fine scroll is implemented, keep the IRQ
-    handler minimal and acknowledge `$D019`. Test on PAL timing in VICE.
-12. **Text routine.** `print` converts A–Z to screen codes and leaves digits
+10. **Frame budget.** The screen shift is the most expensive routine (about
+    170 raster lines) and runs into the visible picture of the next frame.
+    Shift only when the fine scroll wraps, keep `update_scroll` first in the
+    play branch, and shift rows top to bottom so each row is in memory
+    before the beam reaches it. Anything added ahead of `update_scroll` in
+    the frame eats into this margin.
+11. **Raster split timing.** The IRQ handlers are minimal, acknowledge
+    `$D019` and sit on lines 50/68 rather than on the bad lines 51/67. With
+    the KERNAL banked out, `$FFFE/$FFFF` must point at a valid handler at
+    all times and `$FFFA/$FFFB` must handle RESTORE. Any new code that
+    switches `$01` must keep I/O mapped.
+12. **38-column play area.** Rows 2–24 run in 38-column mode, so screen
+    columns 0 and 39 are drawn but hidden under the borders and the visible
+    street is `x = 8..311`. Keep `PLAYER_MIN_X` at 8 or more and do not
+    place anything that must be readable in those two columns. Obstacles
+    still spawn at `x = 320` and emerge from under the right border.
+13. **Text routine.** `print` converts A–Z to screen codes and leaves digits
     and spaces unchanged, which is correct for the HUD. Check any new
     punctuation against the screen-code table.
 
@@ -497,7 +559,7 @@ Build and run with `ninja` / `ninja run`, then verify:
 - [ ] Double-jumping is impossible.
 - [ ] Obstacles enter from the right edge, not from x = 255.
 - [ ] All obstacle types appear and scroll left at the world speed.
-- [ ] The background scrolls smoothly and the HUD stays fixed.
+- [x] The background scrolls smoothly and the HUD stays fixed.
 - [ ] Touching an obstacle costs one life, flashes the player and does not
       drain multiple lives in one overlap.
 - [ ] Three hits end the game.
@@ -522,8 +584,9 @@ Build and run with `ninja` / `ninja run`, then verify:
   are a stretch goal.
 - **Score:** four-digit BCD, survival points plus a +25 jump bonus. Extend to
   six digits if longer sessions are desired.
-- **Background:** coarse character scrolling is the baseline; fine scrolling
-  with a raster split is the recommended polish.
+- **Background:** coarse character scrolling (Phase 3a) plus `$D016` fine
+  scrolling (Phase 3b) with a two-line raster split that keeps the HUD still
+  (Phase 3c). All three are implemented.
 - **Sprite orientation:** the supplied bike faces right, which matches the
   direction of travel. Obstacles are orientation-neutral; a car should face
   left.
