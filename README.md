@@ -6,6 +6,8 @@ tested in **VICE** (`x64sc.exe`).
 
 ![Streetbike title screen](screenshots/title.png)
 
+![Streetbike gameplay](screenshots/gameplay.gif)
+
 > **Status:** the side-scrolling bike game is playable: title screen,
 > scrolling street, obstacles, jumping, three lives, a crash sequence with a
 > get-ready screen, and a game-over screen. Scoring is currently limited to
@@ -26,7 +28,7 @@ is gone it is game over.
 | `build/streetbike.prg` | Assembled program, ready to load (generated) |
 | `build/streetbike.d64` | 1541 disk image containing `streetbike` (generated) |
 | `build.ninja` | Ninja build file: assembles with ACME, packs with c1541.exe |
-| `screenshots/` | Screenshots of the game, taken in VICE |
+| `screenshots/` | Screenshots and an animated gameplay GIF, taken in VICE |
 | `PLAN.md` | Development plan for the Streetbike refactor |
 
 ## Build & run
