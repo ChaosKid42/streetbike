@@ -147,12 +147,13 @@ READY_FRAMES = 150          ; 3 seconds on the get-ready screen
 TUNE_NOTE_FRAMES = 8        ; frames per note of the sad tune
 SAD_TUNE_LEN = 8            ; notes in the sad tune
 
-; Raster split lines (PAL). Row 0 starts on line 51 and row 2 on
-; line 67; both are bad lines, so the interrupts are placed on the
-; lines just before/inside them where a mid-line write cannot show:
-; line 50 is still top border, line 68 is inside the blank sky row.
-IRQ_LINE_HUD  = 50          ; $D016 fine scroll = 0 for rows 0-1
-IRQ_LINE_PLAY = 68          ; $D016 fine scroll = zp_fine below
+; Raster split lines (PAL). Row 0 starts on line 51, row 2 on line
+; 67 and row 6 on line 99; all three are bad lines, so the
+; interrupts are placed on the lines just before/inside them where
+; a mid-line write cannot show: line 50 is still top border, line
+; 98 is the last line of the blank sky row 5.
+IRQ_LINE_HUD    = 50        ; $D016 fine scroll = 0 for rows 0-5
+IRQ_LINE_SCROLL = 98        ; $D016 fine scroll = zp_fine below
 
 ; ------------------------------------------------------------
 ;  Macro: print a zero-terminated string at a screen address
@@ -357,7 +358,7 @@ main_loop:
     jmp main_loop
 
 .title:
-    jsr update_title_scroll
+    jsr update_scroll
     jsr animate_bike
     jsr write_player
     lda zp_joy
@@ -469,7 +470,8 @@ resume_game:
 ;  the player leaves the game-over screen.
 ;
 ;  The text lives in the sky rows 2-5, which shift_rows never
-;  touches, so it stays put while the street scrolls below it.
+;  touches and which sit above the fine-scroll split, so it stays
+;  put while the street scrolls smoothly below it.
 ; ============================================================
 title_screen:
     lda #0
@@ -491,7 +493,7 @@ title_screen:
     inx
     cpx #6
     bne .ts_clear
-    lda #2
+    lda #1                  ; title street scrolls 1 px/frame
     sta zp_speed
     lda #4
     sta zp_anim
@@ -1340,19 +1342,19 @@ wait_frame:
 ; ============================================================
 ;  RASTER SPLIT  (Phase 3c)
 ;
-;  Two chained raster interrupts keep the HUD rows 0-1 free of
-;  the horizontal fine scroll. Each handler writes $D016, points
-;  the raster compare and the IRQ vector at the other handler and
-;  acknowledges the VIC. Only A is used, so only A is saved.
-;  The main loop no longer touches $D016; it just keeps zp_fine
-;  up to date and irq_play applies it once per frame.
+;  Two chained raster interrupts keep rows 0-5 (the HUD and the
+;  title text) free of the horizontal fine scroll. Each handler
+;  writes $D016, points the raster compare and the IRQ vector at
+;  the other handler and acknowledges the VIC. Only A is used, so
+;  only A is saved. The main loop no longer touches $D016; it just
+;  keeps zp_fine up to date and irq_play applies it once per frame.
 ;
 ;  The PRG build owns the hardware vector at $FFFE/$FFFF. The cart
 ;  build keeps the KERNAL banked in, so it chains through the
 ;  KERNAL's $0314/$0315 vector and exits via $EA81.
 ;
-;  The HUD rows use 40 columns so text at column 0 is fully
-;  visible. The scrolling rows use 38 columns: the side borders
+;  Rows 0-5 use 40 columns so text at column 0 is fully visible.
+;  The scrolling rows use 38 columns: the side borders
 ;  grow by one character and hide columns 0 and 39, which are
 ;  only partially on screen while the fine scroll is non-zero.
 ;  Without this the left edge of the street visibly slides and
@@ -1362,9 +1364,9 @@ irq_hud:
     pha
     lda VIC_CTRL2
     and #%11110000
-    ora #%00001000          ; rows 0-1 : 40 columns, no fine scroll
+    ora #%00001000          ; rows 0-5 : 40 columns, no fine scroll
     sta VIC_CTRL2
-    lda #IRQ_LINE_PLAY
+    lda #IRQ_LINE_SCROLL
     sta VIC_RASTER
 !ifdef CART {
     lda #<irq_play
@@ -1388,7 +1390,7 @@ irq_hud:
 
 irq_play:
     pha
-    jsr write_fine_scroll   ; rows 2-24 : 38 columns, scroll by zp_fine
+    jsr write_fine_scroll   ; rows 6-24 : 38 columns, scroll by zp_fine
     lda #IRQ_LINE_HUD
     sta VIC_RASTER
 !ifdef CART {
@@ -1618,7 +1620,7 @@ scroll_background:
 ;
 ; Timing: the coarse shift takes ~170 raster lines, so it runs
 ; past the top border and well into the next frame's picture. The
-; new zp_fine is picked up by irq_play on line 68, and the rows
+; new zp_fine is picked up by irq_play on line 98, and the rows
 ; are shifted top to bottom ahead of the beam: rows 6-11 are done
 ; before line 99 and rows 12-24 before line 147. zp_fine must be
 ; stored before the shift so the value and the memory agree when
@@ -1634,18 +1636,6 @@ update_scroll:
     jmp scroll_background
 .usc_store:
     sta zp_fine
-    rts
-
-; Title screen: the street scrolls one whole column every 8
-; frames. The fine scroll is not used here, so the title text
-; does not wobble; the coarse shift is the same speed as
-; zp_speed = 1 would be.
-update_title_scroll:
-    lda zp_frame
-    and #7
-    bne .uts_done
-    jmp scroll_background
-.uts_done:
     rts
 
 ; Apply zp_fine to $D016 and select 38-column mode, leaving the

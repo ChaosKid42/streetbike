@@ -121,8 +121,8 @@ Key pieces of the source:
 * **`draw_column`** — builds one column of sky, skyline and road; the
   building heights come from `building_heights`.
 * **`irq_hud` / `irq_play`** — two chained raster interrupts (lines 50 and
-  68) keep the HUD rows free of the fine scroll and switch the scrolling
-  rows to 38 columns so the street edge does not slide.
+  98) keep the HUD and title rows free of the fine scroll and switch the
+  scrolling rows to 38 columns so the street edge does not slide.
 * **`spawn_obstacle` / `update_obstacles`** — six obstacle slots, one per
   hardware sprite 1–6. Obstacles enter at x = 320 and scroll left; a new one
   appears every 90 frames in a random lane that is not already receiving

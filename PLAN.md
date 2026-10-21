@@ -237,8 +237,8 @@ switch on state:
   get ready: animate the bike, count down three seconds, then resume play
   game over: count down input delay, wait for fire to return to title
 
-independently, raster IRQs on lines 50 and 68 write $D016 so the
-HUD rows 0-1 are unscrolled and rows 2-24 use zp_fine
+independently, raster IRQs on lines 50 and 98 write $D016 so rows
+0-5 (HUD and title text) are unscrolled and rows 6-24 use zp_fine
 ```
 
 ---
@@ -368,17 +368,17 @@ horizontally.
    KERNAL dispatch and the `$0314` indirection entirely.
 2. Two chained raster interrupts own `$D016`:
    - `irq_hud` on line 50 (PAL): fine scroll = 0 and 40 columns for rows
-     0–1, then reprogram the compare to line 68 and the vector to
+     0–5, then reprogram the compare to line 98 and the vector to
      `irq_play`.
-   - `irq_play` on line 68: fine scroll = `zp_fine` and 38 columns for rows
-     2–24, then reprogram the compare to line 50 and the vector to
+   - `irq_play` on line 98: fine scroll = `zp_fine` and 38 columns for rows
+     6–24, then reprogram the compare to line 50 and the vector to
      `irq_hud`.
    - Each handler saves only A, writes `$D016`, acknowledges `$D019` and
      returns.
-   - Lines 50/68 rather than 51/67: rows 0 and 2 start on bad lines, where
+   - Lines 50/98 rather than 51/99: rows 0 and 6 start on bad lines, where
      a mid-line write could show as a seam. Line 50 is still top border and
-     line 68 is inside the always-blank sky row 2, so the write is never
-     visible.
+     line 98 is the last line of the always-blank sky row 5, so the write is
+     never visible.
 3. Enable interrupts (`cli`) with the CIA interrupt sources kept disabled.
 4. The main loop no longer writes `$D016`; `update_scroll` only maintains
    `zp_fine` and `irq_play` applies it once per frame. `zp_fine` is still
@@ -497,9 +497,10 @@ Lessons from implementation:
   the scrolling rows would be left behind one column to the left on every
   coarse shift and would wobble with the fine scroll. The four sky rows hold
   the title, the two prompts and the 34-column control hint.
-- **The title scrolls without the fine scroll.** `update_title_scroll` shifts
-  one whole column every 8 frames, which is the same speed as `zp_speed = 1`
-  with fine scrolling but keeps the text perfectly still.
+- **The title scrolls smoothly with the fine scroll.** The title screen runs
+  `update_scroll` with `zp_speed = 1`. The fine-scroll split sits on line 98,
+  the last line of the blank sky row 5, so rows 0–5 (HUD and title text)
+  stay still while rows 6–24 scroll at pixel granularity.
 - **`draw_score_at` takes a destination.** `draw_score` now sets `zp_dst` to
   the HUD digits and falls through to `draw_score_at`, which the game-over
   screen reuses. It also writes colour 1, because the game-over rows are
