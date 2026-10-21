@@ -101,7 +101,8 @@ Key pieces of the source:
 * **`add_score` / `draw_score`** — score is kept as two BCD bytes and
   drawn straight into screen memory.
 * **`rand_byte`** — an 8-bit LFSR used for asteroid positions.
-* **`beep_hit`** — a short SID noise burst on collision.
+* **`update_tune`** — the descending SID pulse phrase played during the
+  crash sequence.
 
 Sprites live in VIC bank 0 RAM at `$2000`–`$20BF` (pointers `$80`–`$82`),
 deliberately outside the `$1000–$1FFF` character-ROM window. The player is

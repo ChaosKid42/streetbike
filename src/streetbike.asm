@@ -19,8 +19,10 @@
 ;  scrolls it at pixel granularity with the $D016 fine scroll.
 ;  Phase 3c adds a raster split so the HUD rows stay still.
 ;  Phase 4 adds the obstacles, the software hitboxes, the
-;  jump-over bonus and the three lives. Scoring and difficulty
-;  follow in Phase 5; see PLAN.md.
+;  jump-over bonus and the three lives. A hit now plays a crash
+;  sequence: the world freezes, the bike is thrown off the screen
+;  with a sad tune, and a get-ready screen follows. Scoring and
+;  difficulty follow in Phase 5; see PLAN.md.
 ; ============================================================
 
 ; The C64's 6510 is a 6502 core with an added I/O port at $00/$01; its
@@ -56,6 +58,8 @@ CIA1_DDRA    = $dc02
 
 SID_V1_FLO   = $d400
 SID_V1_FHI   = $d401
+SID_V1_PWLO  = $d402
+SID_V1_PWHI  = $d403
 SID_V1_CTRL  = $d404
 SID_V1_AD    = $d405
 SID_V1_SR    = $d406
@@ -74,11 +78,11 @@ zp_jump_t     = $04         ; jump animation index, 0 = grounded
 zp_jump_lift  = $05         ; current lift in pixels
 zp_anim       = $06         ; pedalling animation counter
 zp_bike_frame = $07         ; 0 / 1 pedalling frame
-zp_state      = $08         ; 0 title, 1 play, 2 game over
+zp_state      = $08         ; 0 title, 1 play, 2 over, 3 crash, 4 ready
 zp_score_l    = $09         ; BCD : tens / units
 zp_score_h    = $0a         ; BCD : thousands / hundreds
 zp_lives      = $0b
-zp_inv        = $0c         ; invulnerability countdown
+; $0c free (was zp_inv)
 zp_fire_prev  = $0d         ; previous fire state (edge detect)
 zp_joy        = $0e
 zp_cool       = $0f         ; game-over input delay
@@ -109,6 +113,11 @@ zp_oy1        = $47         ; obstacle hitbox : top
 zp_oy2        = $48         ; obstacle hitbox : bottom
 zp_idx        = $49         ; obstacle slot being spawned
 zp_mask       = $4a         ; sprite enable mask for $D015
+zp_crash_t    = $4b         ; crash pause / get-ready countdown
+zp_crash_vy   = $4c         ; signed vertical speed of the crash arc
+zp_crash_ph   = $4d         ; 0 = pause, 1 = flying off
+zp_tune_t     = $4e         ; sad tune note index
+zp_tune_n     = $4f         ; frames until the next note
 
 PLAYER_MIN_X = 40
 PLAYER_MAX_X = 224
@@ -119,8 +128,16 @@ JUMP_FRAMES  = 20
 
 LANE_COUNT   = 3            ; obstacle lanes, see lane_y
 SPAWN_FRAMES = 90           ; frames between spawns (Phase 5: dynamic)
-INV_FRAMES   = 60           ; invulnerability after a hit
 BONUS_POINTS = $25          ; BCD 25, awarded for a jump-over
+
+CRASH_PAUSE  = 25           ; frames the world freezes after a hit
+CRASH_VY0    = -11          ; initial upward speed of the crash arc
+CRASH_GRAV   = 1            ; gravity added to the vertical speed
+CRASH_DX     = 2            ; horizontal speed of the crash arc
+CRASH_END_Y  = 240          ; below this the bike is off the screen
+READY_FRAMES = 150          ; 3 seconds on the get-ready screen
+TUNE_NOTE_FRAMES = 8        ; frames per note of the sad tune
+SAD_TUNE_LEN = 8            ; notes in the sad tune
 
 ; Raster split lines (PAL). Row 0 starts on line 51 and row 2 on
 ; line 67; both are bad lines, so the interrupts are placed on the
@@ -253,6 +270,10 @@ main_loop:
     beq .playing
     cmp #2
     beq .gameover
+    cmp #3
+    beq .crash
+    cmp #4
+    beq .ready
     jmp .title
 
 .playing:
@@ -262,11 +283,10 @@ main_loop:
     jsr animate_bike
     jsr update_obstacles
     jsr update_spawn
-    jsr update_inv
     jsr check_collisions
     lda zp_state
     cmp #1
-    bne main_loop           ; the last life was lost : skip the rest
+    bne main_loop           ; a hit started the crash sequence : skip the rest
     jsr check_bonus
     jsr write_player
     jsr write_obstacles
@@ -289,7 +309,22 @@ main_loop:
 .title_wait:
     jmp main_loop
 
+.crash:
+    jsr update_crash
+    jmp main_loop
+
+.ready:
+    jsr animate_bike
+    jsr write_player
+    jsr update_tune
+    dec zp_crash_t
+    bne .rd_wait
+    jsr resume_game
+.rd_wait:
+    jmp main_loop
+
 .gameover:
+    jsr update_tune         ; let the crash tune finish and close the gate
     lda zp_cool
     beq .fireok
     dec zp_cool
@@ -310,31 +345,40 @@ start_game:
     lda #0
     sta zp_score_l
     sta zp_score_h
+    sta zp_frame
+    lda #3
+    sta zp_lives
+    lda #1
+    sta zp_fire_prev        ; fire is still held when the game starts
+    jsr resume_game
+    rts
+
+; Resume play after a crash. Unlike start_game this keeps the
+; score and the lives; it rebuilds the street, the HUD and the
+; obstacle slots and puts the bike back in the middle lane.
+resume_game:
+    lda #0
     sta zp_jump_t
     sta zp_jump_lift
     sta zp_bike_frame
-    sta zp_inv
     sta zp_cool
-    sta zp_frame
     sta zp_fine
     sta zp_snd
+    sta zp_crash_t
+    sta zp_crash_ph
     ldx #0
-.sg_clear:
+.rg_clear:
     sta zp_obs_active,x
     sta zp_obs_scored,x
     inx
     cpx #6
-    bne .sg_clear
+    bne .rg_clear
     lda #2
     sta zp_speed
     lda #4
     sta zp_anim
-    lda #3
-    sta zp_lives
     lda #SPAWN_FRAMES
     sta zp_spawn
-    lda #1
-    sta zp_fire_prev        ; fire is still held when the game starts
 
     lda #80
     sta zp_player_x
@@ -367,10 +411,10 @@ title_screen:
     sta zp_score_h
     sta zp_cool
     sta zp_snd
+    sta SID_V1_CTRL         ; silence any tune left over from the crash
     sta zp_jump_t
     sta zp_jump_lift
     sta zp_bike_frame
-    sta zp_inv
     sta zp_frame
     sta zp_fine
     ldx #0
@@ -783,10 +827,6 @@ set_player_box:
 ; zero high byte can overlap the player: x >= 256 is still to the
 ; right and x < 0 is already past the left edge.
 check_collisions:
-    lda zp_inv
-    beq .cc_go
-    rts                     ; still invulnerable
-.cc_go:
     jsr set_player_box
     ldx #0
 .cc_slot:
@@ -845,27 +885,176 @@ check_collisions:
     rts
 
 ; One life lost. The obstacle that was hit is removed so it cannot
-; hit the player again, and zp_inv keeps the player safe while the
-; sprite flashes.
+; hit the player again, then the crash sequence takes over: the
+; world freezes, the bike is thrown off the screen and the
+; get-ready screen brings the player back.
 hit_obstacle:
     lda #0
     sta zp_obs_active,x
     dec zp_lives
-    lda #INV_FRAMES
-    sta zp_inv
-    jsr beep_hit
     jsr draw_lives
-    lda zp_lives
-    bne .ho_done
-    jmp game_over
-.ho_done:
+    jmp crash_start
+
+; ============================================================
+;  CRASH SEQUENCE
+;
+;  State 3. The world stops for CRASH_PAUSE frames, then the bike
+;  follows a ballistic arc (constant horizontal speed, gravity on
+;  the vertical speed) until it is below the screen. The sad tune
+;  plays during the arc. The jump pose is used for the throw, so
+;  zp_player_y is adjusted to keep the artwork in place when the
+;  pose changes.
+; ============================================================
+crash_start:
+    lda #3
+    sta zp_state
+    lda #CRASH_PAUSE
+    sta zp_crash_t
+    lda #0
+    sta zp_crash_ph
+    sta zp_tune_t
+    sta zp_tune_n
+
+    lda zp_jump_t
+    beq .cs_ground
+    lda zp_player_y
+    sec
+    sbc zp_jump_lift        ; keep the airborne bike where it is
+    jmp .cs_set
+.cs_ground:
+    lda zp_player_y
+    clc
+    adc #5                  ; jump artwork sits 5 rows higher in the cell
+.cs_set:
+    sta zp_player_y
+    lda #1
+    sta zp_jump_t           ; the bike is thrown in the jump pose
+    lda #0
+    sta zp_jump_lift
+    jsr write_player
     rts
 
-update_inv:
-    lda zp_inv
-    beq .ui_done
-    dec zp_inv
-.ui_done:
+update_crash:
+    lda zp_crash_ph
+    bne .uc_fly
+
+    dec zp_crash_t
+    bne .uc_draw
+    lda #1
+    sta zp_crash_ph
+    lda #CRASH_VY0
+    sta zp_crash_vy
+    lda #0
+    sta zp_tune_t
+    lda #1
+    sta zp_tune_n
+    lda #$0f
+    sta SID_VOL
+    lda #$00
+    sta SID_V1_PWLO
+    lda #$08
+    sta SID_V1_PWHI         ; 50% duty : the loudest pulse setting
+    lda #$00
+    sta SID_V1_AD
+    lda #$f8
+    sta SID_V1_SR           ; pulse with a short release
+    jmp .uc_draw
+
+.uc_fly:
+    jsr update_tune
+    lda zp_player_y
+    clc
+    adc zp_crash_vy
+    sta zp_player_y
+    lda zp_crash_vy
+    clc
+    adc #CRASH_GRAV
+    sta zp_crash_vy
+    lda zp_player_x
+    sec
+    sbc #CRASH_DX
+    bcs .uc_xok
+    lda #0                  ; a sprite cannot be drawn at a negative X
+.uc_xok:
+    sta zp_player_x
+    lda zp_player_y
+    cmp #CRASH_END_Y
+    bcc .uc_draw
+    lda zp_lives
+    beq .uc_over
+    jsr ready_screen
+    rts
+.uc_over:
+    jsr game_over
+    rts
+.uc_draw:
+    jsr write_player
+    rts
+
+; One note of the sad tune every TUNE_NOTE_FRAMES frames. The
+; gate stays open across the notes, so only the frequency changes.
+update_tune:
+    dec zp_tune_n
+    bne .ut_done
+    ldx zp_tune_t
+    cpx #SAD_TUNE_LEN
+    bcs .ut_stop
+    lda sad_tune_lo,x
+    sta SID_V1_FLO
+    lda sad_tune_hi,x
+    sta SID_V1_FHI
+    lda #$41                ; pulse waveform + gate
+    sta SID_V1_CTRL
+    inx
+    stx zp_tune_t
+    lda #TUNE_NOTE_FRAMES
+    sta zp_tune_n
+    rts
+.ut_stop:
+    lda #0
+    sta SID_V1_CTRL
+.ut_done:
+    rts
+
+; ============================================================
+;  GET READY SCREEN
+;
+;  State 4. The street is cleared and the bike pedals in place
+;  below the message for READY_FRAMES frames, then resume_game
+;  rebuilds the play screen.
+; ============================================================
+ready_screen:
+    lda #4
+    sta zp_state
+    lda #READY_FRAMES
+    sta zp_crash_t
+    lda #0
+    sta zp_jump_t
+    sta zp_jump_lift
+    sta zp_bike_frame
+    sta zp_fine
+    sta zp_snd
+    sta zp_crash_ph
+    ldx #0
+.rs_clear:
+    sta zp_obs_active,x
+    sta zp_obs_scored,x
+    inx
+    cpx #6
+    bne .rs_clear
+    lda #4
+    sta zp_anim
+    lda #%00000001          ; only the bike is visible
+    sta VIC_SPR_ENA
+
+    jsr clear_screen
+    +print_at SCREEN+10*40+12, txt_ready
+
+    lda #148                ; centre the 24 px bike on the screen
+    sta zp_player_x
+    lda #162                ; row 14
+    sta zp_player_y
+    jsr write_player
     rts
 
 ; Award the jump-over bonus once per obstacle, when its right
@@ -950,15 +1139,6 @@ write_obstacles:
     inx
     cpx #6
     bne .wo_slot
-    lda zp_inv
-    beq .wo_enable
-    lda zp_frame
-    and #%00000100
-    beq .wo_enable
-    lda zp_mask
-    and #%11111110          ; flash the player while invulnerable
-    sta zp_mask
-.wo_enable:
     lda zp_mask
     sta VIC_SPR_ENA
     rts
@@ -1025,27 +1205,8 @@ draw_lives:
     rts
 
 ; ============================================================
-;  SOUND  (short SID noise burst)
+;  SOUND  (short SID beeps)
 ; ============================================================
-beep_hit:
-    lda #0
-    sta SID_V1_CTRL
-    lda #$0f
-    sta SID_VOL
-    lda #0
-    sta SID_V1_FLO
-    lda #$30
-    sta SID_V1_FHI
-    lda #0
-    sta SID_V1_AD
-    lda #$f0
-    sta SID_V1_SR
-    lda #$81                ; noise waveform + gate
-    sta SID_V1_CTRL
-    lda #20
-    sta zp_snd
-    rts
-
 ; Short high beep for the jump-over bonus.
 beep_bonus:
     lda #0
@@ -1431,6 +1592,8 @@ txt_over:    !text "GAME OVER"
              !byte 0
 txt_again:   !text "PRESS FIRE"
              !byte 0
+txt_ready:   !text "GET READY PLAYER"
+             !byte 0
 
 ; ============================================================
 ;  TABLES
@@ -1440,6 +1603,12 @@ bike_frames:
 
 jump_lift:
     !byte 0,4,8,12,16,20,24,28,28,28,28,28,28,24,20,16,12,8,4,0
+
+; Sad descending phrase for the crash: A3 G3 F3 E3 D3 C3 B2 A2.
+sad_tune_lo:
+    !byte $a2, $0a, $9d, $f6, $c4, $b3, $36, $51
+sad_tune_hi:
+    !byte $0e, $0d, $0b, $0a, $09, $08, $08, $07
 
 ; Obstacle lanes: the sprite Y of each lane. The sprite's bottom
 ; row is the ground line, so an obstacle in the player's lane uses

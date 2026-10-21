@@ -169,7 +169,7 @@ port). Suggested layout:
 | `$09` | `zp_score_l` | 1 | BCD tens / units |
 | `$0A` | `zp_score_h` | 1 | BCD thousands / hundreds |
 | `$0B` | `zp_lives` | 1 | Remaining lives |
-| `$0C` | `zp_inv` | 1 | Invulnerability countdown |
+| `$0C` | — | 1 | free (was `zp_inv`) |
 | `$0D` | `zp_fire_prev` | 1 | Previous fire state (edge detect) |
 | `$0E` | `zp_joy` | 1 | Current joystick byte |
 | `$0F` | `zp_cool` | 1 | Game-over input delay |
@@ -200,16 +200,21 @@ port). Suggested layout:
 | `$48` | `zp_oy2` | 1 | Obstacle hitbox bottom |
 | `$49` | `zp_idx` | 1 | Obstacle slot being spawned |
 | `$4A` | `zp_mask` | 1 | Sprite enable mask for `$D015` |
+| `$4B` | `zp_crash_t` | 1 | Crash pause / get-ready countdown |
+| `$4C` | `zp_crash_vy` | 1 | Signed vertical speed of the crash arc |
+| `$4D` | `zp_crash_ph` | 1 | 0 = pause, 1 = flying off |
+| `$4E` | `zp_tune_t` | 1 | Sad tune note index |
+| `$4F` | `zp_tune_n` | 1 | Frames until the next note |
 
 ### 3.5 Game states
-
-Keep the existing three-state machine:
 
 | State | Value | Behaviour |
 |-------|-------|-----------|
 | Title | 0 | Background scrolls slowly, bike animates, no obstacles, fire starts |
 | Play | 1 | Full game loop |
 | Game over | 2 | World frozen, final score shown, fire returns to the title screen after a delay |
+| Crash | 3 | World frozen for half a second, then the bike is thrown in an arc off the screen while a sad tune plays |
+| Get ready | 4 | Cleared screen with `GET READY PLAYER` and the pedalling bike for three seconds, then back to play |
 
 ### 3.6 Frame loop
 
@@ -227,6 +232,9 @@ switch on state:
              update score / difficulty
              write sprites (X/Y, pointers, enable mask, 9th X bit)
              update HUD
+  crash:     count down the pause, then move the bike along the arc and
+             play the sad tune; afterwards the get-ready screen or game over
+  get ready: animate the bike, count down three seconds, then resume play
   game over: count down input delay, wait for fire to return to title
 
 independently, raster IRQs on lines 50 and 68 write $D016 so the
@@ -412,11 +420,14 @@ stays perfectly still, and the screen shift happens without visible tearing.
    - Player hitbox: riding `x+4..x+20`, `y+8..y+20`; jumping uses the bike
      content near `y+10..y+16` plus the lift, narrowed to `x+8..x+16`.
    - Obstacle hitbox from the type table.
-   - On overlap: decrement `zp_lives`, set `zp_inv = 60`, deactivate the
-     collided obstacle, play the hit sound, update the HUD.
-   - While `zp_inv > 0`, skip collision checks and flash sprite 0 by toggling
-     its enable bit every 4 frames.
-   - At `zp_lives = 0`, enter game over.
+   - On overlap: decrement `zp_lives`, deactivate the collided obstacle,
+     play the hit sound, update the HUD and enter the crash sequence.
+   - Crash sequence: freeze the world for 25 frames, then throw the bike in
+     a ballistic arc (constant horizontal speed, gravity on the vertical
+     speed) until it is below the screen, playing a descending sad tune.
+   - Afterwards show the get-ready screen for 150 frames (three seconds) and
+     resume play with the score and lives intact. If no lives are left, go
+     to game over instead.
 6. Implement jump-over bonus detection:
    - When an obstacle's right edge passes the player's left edge and
      `zp_obs_scored` is clear:
@@ -484,7 +495,7 @@ bonus points, the HUD updates correctly, and the game visibly speeds up.
    - Fire returns to the title screen instead of restarting immediately.
    - Keep the input delay (`zp_cool`) to avoid accidental input.
 3. Sound:
-   - Reuse `beep_hit` for collisions.
+   - The crash sequence plays a descending sad tune instead of a hit beep.
    - Add `beep_jump` (short rising pulse) and `beep_bonus` (short high beep).
    - Optional: a low engine tone on SID voice 2 whose frequency follows
      `zp_speed`.
