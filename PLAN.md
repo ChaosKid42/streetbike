@@ -79,11 +79,13 @@ row 12-24   road surface + lane markings (grey)
 - The scrolling area is rows 2–24 (23 rows) and uses 38 columns: the side
   borders cover columns 0 and 39, so the visible street is `x = 8..311`.
 - Road pixel range: `y = 96..199`.
-- Player sprite Y range: `96..179` (sprite is 21 px tall; content ends at
-  `y + 20`).
-- Player sprite X range: `40..120` (bike content spans `x + 2 .. x + 23`).
+- Player sprite Y range: `128..179` (sprite is 21 px tall; content ends at
+  `y + 20`, so the ground line stays on the road).
+- Player sprite X range: `40..224` (bike content spans `x + 0 .. x + 20`).
 - Obstacles spawn at `x = 320` (just off the right edge) and move left.
-- Obstacles despawn when `x < -24`.
+- Obstacles are freed when `x < 0`. The VIC sprite X is 9 bits (0–511), so
+a sprite cannot be drawn at a negative X; the sprite pops out at the left
+edge of the display, well to the left of the player.
 
 ### 3.2 Sprite budget and data layout
 
@@ -186,6 +188,18 @@ port). Suggested layout:
 | `$2D` | `zp_obs_type` | 6 | Obstacle type |
 | `$33` | `zp_obs_active` | 6 | 0 = free, 1 = active |
 | `$39` | `zp_obs_scored` | 6 | Jump-over bonus already awarded |
+| `$3F` | `zp_tmp` | 1 | Scratch / low byte of temp pointer |
+| `$40` | `zp_tmp2` | 1 | High byte of temp pointer |
+| `$41` | `zp_px1` | 1 | Player hitbox left |
+| `$42` | `zp_px2` | 1 | Player hitbox right |
+| `$43` | `zp_py1` | 1 | Player hitbox top |
+| `$44` | `zp_py2` | 1 | Player hitbox bottom |
+| `$45` | `zp_ox1` | 1 | Obstacle hitbox left |
+| `$46` | `zp_ox2` | 1 | Obstacle hitbox right |
+| `$47` | `zp_oy1` | 1 | Obstacle hitbox top |
+| `$48` | `zp_oy2` | 1 | Obstacle hitbox bottom |
+| `$49` | `zp_idx` | 1 | Obstacle slot being spawned |
+| `$4A` | `zp_mask` | 1 | Sprite enable mask for `$D015` |
 
 ### 3.5 Game states
 
@@ -265,13 +279,15 @@ three images can be displayed without corruption.
 **Status: complete.**
 
 1. Replace the asteroid player logic with the bike:
-   - `zp_player_x` / `zp_player_y` with clamping to `40..120` and `96..179`.
+   - `zp_player_x` / `zp_player_y` with clamping to `40..224` and `128..179`.
    - Up/down/left/right movement at 2 px/frame.
    - Pedalling animation: toggle `zp_bike_frame` every 4 frames while
      grounded; set the sprite pointer to `$80`/`$81`.
 2. Implement the jump:
    - Fire edge detection using `zp_fire_prev`.
    - 16-entry lift table, e.g. `0,4,8,12,16,20,24,28,28,24,20,16,12,8,4,0`.
+     Phase 4 lengthened it to 20 entries so the jump has a usable timing
+     window against the obstacle hitboxes.
    - `zp_jump_t` indexes the table; `zp_jump_lift` is subtracted from
      `zp_player_y` when writing the sprite.
    - While airborne, use pointer `$82`; ignore up/down input; allow
@@ -373,6 +389,8 @@ stays perfectly still, and the screen shift happens without visible tearing.
 
 ### Phase 4 — Obstacles, collision and lives
 
+**Status: complete.**
+
 1. Design the obstacle sprites (see §5). Export each as a 64-byte hires block
    and add it to the sprite data block in `src/streetbike.asm`.
 2. Add the obstacle type table:
@@ -383,7 +401,7 @@ stays perfectly still, and the screen shift happens without visible tearing.
    - `spawn_obstacle`: find a free slot, set X = 320, pick a random lane Y and
      type, reset `zp_obs_scored`.
    - `update_obstacles`: subtract `zp_speed` from the 16-bit X; deactivate
-     when `x < -24`.
+     when `x < 0`.
    - `write_obstacles`: write X low byte, Y, pointer, colour, and the 9th X
      bit in `$D010`.
 4. Implement the sprite enable mask:
@@ -392,7 +410,7 @@ stays perfectly still, and the screen shift happens without visible tearing.
    - Write the mask to `$D015` each frame.
 5. Implement software AABB collision:
    - Player hitbox: riding `x+4..x+20`, `y+8..y+20`; jumping uses the bike
-     content near `y+10..y+16` plus the lift.
+     content near `y+10..y+16` plus the lift, narrowed to `x+8..x+16`.
    - Obstacle hitbox from the type table.
    - On overlap: decrement `zp_lives`, set `zp_inv = 60`, deactivate the
      collided obstacle, play the hit sound, update the HUD.
@@ -407,6 +425,27 @@ stays perfectly still, and the screen shift happens without visible tearing.
      - Set `zp_obs_scored`.
 7. Prevent unfair spawns: if an active obstacle is already near the right edge
    in the chosen lane, try another lane or skip the spawn.
+
+Lessons from implementation:
+
+- **Negative X is not drawable.** The VIC sprite X is 9 bits (0–511). An
+  obstacle cannot be drawn partially off the left edge, so the slot is freed
+  as soon as `x < 0`. The sprite pops out at the left edge of the display,
+  far from the player's `x = 40..224` band.
+- **Jump window.** With the 16-frame jump the high phase (lift ≥ 12) lasted
+  10 frames, exactly as long as the overlap window of the 12-px-wide trash
+  can and barrier hitboxes at speed 2. That left a one-frame timing window.
+  The jump table was lengthened to 20 frames (15 frames at lift ≥ 12) and
+  the airborne hitbox narrowed to `x+8..x+16`.
+- **Hitboxes are narrower than the artwork.** See §5. The barrier is 24 px
+  wide but its hitbox is 12 px, so the player can clip the ends.
+- **`lane_blocked` clobbers Y.** The spawn retry counter is pushed on the
+  stack around the call.
+- **ACME local labels are zone-scoped**, not scoped to the preceding global
+  label: `.us_done` under `update_spawn` collided with the one under
+  `update_sound`. Give every local label a unique name within the file.
+- **Player start Y** is 152 (the middle lane) so the bike starts aligned with
+  an obstacle lane.
 
 **Acceptance:** Obstacles enter from the right edge (not from x = 255), move
 left, can be jumped over for bonus points, cost a life on contact, and never
@@ -478,10 +517,10 @@ insets are relative to the 24 × 21 sprite cell.
 
 | Type | Name | Visual | Colour | Hitbox (L/R/T/B) | Notes |
 |------|------|--------|--------|------------------|-------|
-| 0 | Traffic cone | Triangle with a wide base and a transparent band for a stripe | Orange `8` | 7/7/6/0 | Small, easy to jump |
-| 1 | Trash can | Cylinder with a lid and a handle | Light grey `15` | 4/4/3/0 | Medium height |
-| 2 | Road barrier | Striped board on two legs | Red `2` | 0/0/4/0 | Wide; needs a well-timed jump |
-| 3 | Pothole / oil slick | Flat irregular oval near the bottom | Dark grey `11` | 2/2/14/0 | Must be jumped; moving to another lane also works |
+| 0 | Traffic cone | Triangle with a wide base and a transparent band for a stripe | Orange `8` | 8/8/6/0 | Small, easy to jump |
+| 1 | Trash can | Cylinder with a lid and a handle | Light grey `15` | 6/6/6/0 | Medium height |
+| 2 | Road barrier | Striped board on two legs | Red `2` | 6/6/6/0 | Wide; needs a well-timed jump |
+| 3 | Pothole / oil slick | Flat irregular oval near the bottom | Dark grey `11` | 4/4/14/0 | Must be jumped; moving to another lane also works |
 | 4 | Oncoming car (optional) | Small car facing left | Medium grey `12` | 1/1/4/0 | Stretch goal; may need two sprites for a longer body |
 
 Design notes:
@@ -494,6 +533,10 @@ Design notes:
   that it is impossible to clear.
 - If a car is added, it should face left (oncoming traffic) and may move
   slightly faster than the world scroll.
+- The hitboxes are deliberately narrower than the artwork (the barrier is
+  24 px wide but only 12 px of hitbox) so the jump arc has a usable timing
+  window at the starting speed. The airborne player hitbox is also narrower
+  (`x+8..x+16`) than the riding one (`x+4..x+20`).
 
 ---
 
@@ -577,9 +620,9 @@ Build and run with `ninja` / `ninja run`, then verify:
 
 - **Lives:** three lives (the brief says "loses one life" but not how many to
   start with).
-- **Left/right:** moves the bike within a screen-space band (`40..120`); it
+- **Left/right:** moves the bike within a screen-space band (`40..224`); it
   does not change the world scroll speed.
-- **Jump:** a fixed 16-frame arc; up/down input is ignored while airborne.
+- **Jump:** a fixed 20-frame arc; up/down input is ignored while airborne.
 - **Obstacles:** static street objects that scroll with the road. Moving cars
   are a stretch goal.
 - **Score:** four-digit BCD, survival points plus a +25 jump bonus. Extend to

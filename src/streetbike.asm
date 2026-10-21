@@ -18,8 +18,9 @@
 ;  Phase 3a adds the scrolling street background. Phase 3b
 ;  scrolls it at pixel granularity with the $D016 fine scroll.
 ;  Phase 3c adds a raster split so the HUD rows stay still.
-;  Obstacles, scoring and lives follow in later phases; see
-;  PLAN.md.
+;  Phase 4 adds the obstacles, the software hitboxes, the
+;  jump-over bonus and the three lives. Scoring and difficulty
+;  follow in Phase 5; see PLAN.md.
 ; ============================================================
 
 ; The C64's 6510 is a 6502 core with an added I/O port at $00/$01; its
@@ -98,13 +99,28 @@ zp_obs_active = $33         ; 6 bytes
 zp_obs_scored = $39         ; 6 bytes
 zp_tmp        = $3f         ; scratch / low byte of temp pointer
 zp_tmp2       = $40         ; high byte of temp pointer
+zp_px1        = $41         ; player hitbox : left
+zp_px2        = $42         ; player hitbox : right
+zp_py1        = $43         ; player hitbox : top
+zp_py2        = $44         ; player hitbox : bottom
+zp_ox1        = $45         ; obstacle hitbox : left
+zp_ox2        = $46         ; obstacle hitbox : right
+zp_oy1        = $47         ; obstacle hitbox : top
+zp_oy2        = $48         ; obstacle hitbox : bottom
+zp_idx        = $49         ; obstacle slot being spawned
+zp_mask       = $4a         ; sprite enable mask for $D015
 
 PLAYER_MIN_X = 40
 PLAYER_MAX_X = 224
 PLAYER_MIN_Y = 128
-PLAYER_MAX_Y = 224
+PLAYER_MAX_Y = 179         ; ground line y+20 stays on the road (y <= 199)
 PLAYER_SPEED = 2
-JUMP_FRAMES  = 16
+JUMP_FRAMES  = 20
+
+LANE_COUNT   = 3            ; obstacle lanes, see lane_y
+SPAWN_FRAMES = 90           ; frames between spawns (Phase 5: dynamic)
+INV_FRAMES   = 60           ; invulnerability after a hit
+BONUS_POINTS = $25          ; BCD 25, awarded for a jump-over
 
 ; Raster split lines (PAL). Row 0 starts on line 51 and row 2 on
 ; line 67; both are bad lines, so the interrupts are placed on the
@@ -228,18 +244,27 @@ start:
     sta zp_inv
     sta zp_frame
     sta zp_fine
-    lda #1
+    ldx #0
+.is_clear:
+    sta zp_obs_active,x
+    sta zp_obs_scored,x
+    inx
+    cpx #6
+    bne .is_clear
+    lda #2
     sta zp_speed
     lda #4
     sta zp_anim
     lda #3
     sta zp_lives
+    lda #SPAWN_FRAMES
+    sta zp_spawn
     lda #$a7
     sta zp_rand
 
     lda #80
     sta zp_player_x
-    lda #160
+    lda #152                ; start in the middle lane
     sta zp_player_y
     jsr write_player
 
@@ -265,6 +290,7 @@ start:
 ; ============================================================
 main_loop:
     jsr wait_frame
+    inc zp_frame
     jsr read_joystick
     jsr update_sound
 
@@ -280,7 +306,16 @@ main_loop:
     jsr move_player
     jsr update_jump
     jsr animate_bike
+    jsr update_obstacles
+    jsr update_spawn
+    jsr update_inv
+    jsr check_collisions
+    lda zp_state
+    cmp #1
+    bne main_loop           ; the last life was lost : skip the rest
+    jsr check_bonus
     jsr write_player
+    jsr write_obstacles
     jsr draw_score
     jmp main_loop
 
@@ -323,30 +358,64 @@ start_game:
     sta zp_cool
     sta zp_frame
     sta zp_fine
-    lda #1
+    sta zp_snd
+    ldx #0
+.sg_clear:
+    sta zp_obs_active,x
+    sta zp_obs_scored,x
+    inx
+    cpx #6
+    bne .sg_clear
+    lda #2
     sta zp_speed
     lda #4
     sta zp_anim
     lda #3
     sta zp_lives
+    lda #SPAWN_FRAMES
+    sta zp_spawn
     lda #1
     sta zp_fire_prev        ; fire is still held when the game starts
 
     lda #80
     sta zp_player_x
-    lda #160
+    lda #152                ; start in the middle lane
     sta zp_player_y
 
-    lda #%00000001          ; only the player sprite for now
+    lda #%00000001          ; player only; obstacles enable themselves
     sta VIC_SPR_ENA
 
     jsr draw_background
     +print_at SCREEN+1*40+0, txt_score
+    +print_at SCREEN+1*40+30, txt_lives
 
     lda #1
     sta zp_state
     jsr write_player
     jsr draw_score
+    jsr draw_lives
+    rts
+
+; ============================================================
+;  GAME OVER
+;  The world is frozen by the state machine; hide every sprite
+;  and free the obstacle slots so a restart starts clean.
+; ============================================================
+game_over:
+    lda #2
+    sta zp_state
+    lda #120
+    sta zp_cool
+    lda #0
+    sta VIC_SPR_ENA
+    ldx #0
+.go_clear:
+    sta zp_obs_active,x
+    inx
+    cpx #6
+    bne .go_clear
+    +print_at SCREEN+10*40+15, txt_over
+    +print_at SCREEN+14*40+12, txt_again
     rts
 
 ; ============================================================
@@ -511,6 +580,378 @@ set_sprite_x:
     rts
 
 ; ============================================================
+;  OBSTACLES  (Phase 4)
+;
+;  Six slots, one per hardware sprite 1-6. A slot is either free
+;  (zp_obs_active = 0) or holds an obstacle scrolling left at
+;  zp_speed. X is 16 bits: obstacles enter at 320, so the 9th
+;  sprite X bit is set until they cross x = 255.
+;
+;  Collision is software AABB, not the VIC sprite/sprite
+;  register: the hitboxes are smaller than the 24x21 cells and
+;  must match the artwork (see obs_hit_* tables).
+; ============================================================
+
+; Scroll every active obstacle left and free the slots that have
+; left the screen. The VIC sprite X is 9 bits (0-511), so a
+; sprite cannot be drawn at a negative X: the slot is freed as
+; soon as x goes below 0, so the sprite disappears at the left
+; edge of the display, far from the player.
+update_obstacles:
+    ldx #0
+.uo_slot:
+    lda zp_obs_active,x
+    beq .uo_next
+    lda zp_obs_x_lo,x
+    sec
+    sbc zp_speed
+    sta zp_obs_x_lo,x
+    lda zp_obs_x_hi,x
+    sbc #0
+    sta zp_obs_x_hi,x
+    cmp #$ff
+    bne .uo_next            ; still on screen (x >= 0)
+    lda #0
+    sta zp_obs_active,x
+.uo_next:
+    inx
+    cpx #6
+    bne .uo_slot
+    rts
+
+; Spawn timer. Phase 5 derives the interval from the score.
+update_spawn:
+    dec zp_spawn
+    bne .usp_done
+    lda #SPAWN_FRAMES
+    sta zp_spawn
+    jmp spawn_obstacle
+.usp_done:
+    rts
+
+; Put one obstacle at x = 320 in a free slot. The lane is picked
+; at random, but a lane that already has an obstacle entering is
+; skipped so two obstacles never arrive on top of each other.
+spawn_obstacle:
+    ldx #0
+.so_find:
+    lda zp_obs_active,x
+    beq .so_free
+    inx
+    cpx #6
+    bne .so_find
+    rts                     ; all slots busy
+.so_free:
+    stx zp_idx
+    ldy #LANE_COUNT
+.so_lane:
+    jsr rand_byte
+    and #3
+    cmp #LANE_COUNT
+    bcc .so_lane_ok
+    lda #0                  ; fold 3 back onto lane 0
+.so_lane_ok:
+    sta zp_tmp
+    tya
+    pha                     ; lane_blocked clobbers Y
+    jsr lane_blocked
+    pla
+    tay
+    bcc .so_place
+    dey
+    bne .so_lane
+    rts                     ; every lane is busy : skip this spawn
+.so_place:
+    ldx zp_idx
+    lda #1
+    sta zp_obs_active,x
+    lda #0
+    sta zp_obs_scored,x
+    lda #<320
+    sta zp_obs_x_lo,x
+    lda #>320
+    sta zp_obs_x_hi,x
+    ldy zp_tmp
+    lda lane_y,y
+    sta zp_obs_y,x
+    jsr rand_byte
+    and #3
+    sta zp_obs_type,x
+    rts
+
+; Carry set if an active obstacle is already entering in the lane
+; whose index is in zp_tmp. "Entering" means x >= 240: still off
+; screen or just emerging from under the right border.
+lane_blocked:
+    ldy zp_tmp
+    lda lane_y,y
+    sta zp_tmp2             ; lane Y
+    ldx #0
+.lb_slot:
+    lda zp_obs_active,x
+    beq .lb_next
+    lda zp_obs_x_hi,x
+    beq .lb_low
+    cmp #1
+    bne .lb_next            ; negative x : already past
+    jmp .lb_check           ; x >= 256 : still entering
+.lb_low:
+    lda zp_obs_x_lo,x
+    cmp #240
+    bcc .lb_next            ; far enough to the right
+.lb_check:
+    lda zp_obs_y,x
+    sec
+    sbc zp_tmp2
+    bcs .lb_diff
+    eor #$ff
+    adc #1                  ; absolute difference
+.lb_diff:
+    cmp #24
+    bcc .lb_blocked
+.lb_next:
+    inx
+    cpx #6
+    bne .lb_slot
+    clc
+    rts
+.lb_blocked:
+    sec
+    rts
+
+; Compute the player's hitbox. Riding, it covers the bike's body
+; and wheels. Airborne, it covers only the bike in the jump pose,
+; which sits higher in the sprite cell, so the lift is subtracted.
+; The airborne box is narrower than the riding one so the jump
+; has a usable timing window against the wide obstacles.
+set_player_box:
+    lda zp_jump_t
+    beq .spb_ground
+    lda zp_player_x
+    clc
+    adc #8
+    sta zp_px1
+    lda zp_player_x
+    clc
+    adc #16
+    sta zp_px2
+    lda zp_player_y
+    sec
+    sbc zp_jump_lift
+    clc
+    adc #10
+    sta zp_py1
+    lda zp_player_y
+    sec
+    sbc zp_jump_lift
+    clc
+    adc #16
+    sta zp_py2
+    rts
+.spb_ground:
+    lda zp_player_x
+    clc
+    adc #4
+    sta zp_px1
+    lda zp_player_x
+    clc
+    adc #20
+    sta zp_px2
+    lda zp_player_y
+    clc
+    adc #8
+    sta zp_py1
+    lda zp_player_y
+    clc
+    adc #20
+    sta zp_py2
+    rts
+
+; AABB test against every active obstacle. Only obstacles with a
+; zero high byte can overlap the player: x >= 256 is still to the
+; right and x < 0 is already past the left edge.
+check_collisions:
+    lda zp_inv
+    beq .cc_go
+    rts                     ; still invulnerable
+.cc_go:
+    jsr set_player_box
+    ldx #0
+.cc_slot:
+    lda zp_obs_active,x
+    beq .cc_next
+    lda zp_obs_x_hi,x
+    bne .cc_next
+    lda zp_obs_x_lo,x
+    cmp #245
+    bcs .cc_next            ; right of the player's box
+    ldy zp_obs_type,x
+    lda zp_obs_x_lo,x
+    clc
+    adc obs_hit_l,y
+    sta zp_ox1
+    lda zp_obs_x_lo,x
+    clc
+    adc #23
+    sec
+    sbc obs_hit_r,y
+    sta zp_ox2
+    lda zp_obs_y,x
+    clc
+    adc obs_hit_t,y
+    sta zp_oy1
+    lda zp_obs_y,x
+    clc
+    adc #20
+    sec
+    sbc obs_hit_b,y
+    sta zp_oy2
+    lda zp_ox1
+    cmp zp_px2
+    beq .cc_x
+    bcs .cc_next            ; ox1 > px2
+.cc_x:
+    lda zp_px1
+    cmp zp_ox2
+    beq .cc_y
+    bcs .cc_next            ; px1 > ox2
+.cc_y:
+    lda zp_oy1
+    cmp zp_py2
+    beq .cc_hit
+    bcs .cc_next            ; oy1 > py2
+    lda zp_py1
+    cmp zp_oy2
+    beq .cc_hit
+    bcs .cc_next            ; py1 > oy2
+.cc_hit:
+    jmp hit_obstacle
+.cc_next:
+    inx
+    cpx #6
+    bne .cc_slot
+    rts
+
+; One life lost. The obstacle that was hit is removed so it cannot
+; hit the player again, and zp_inv keeps the player safe while the
+; sprite flashes.
+hit_obstacle:
+    lda #0
+    sta zp_obs_active,x
+    dec zp_lives
+    lda #INV_FRAMES
+    sta zp_inv
+    jsr beep_hit
+    jsr draw_lives
+    lda zp_lives
+    bne .ho_done
+    jmp game_over
+.ho_done:
+    rts
+
+update_inv:
+    lda zp_inv
+    beq .ui_done
+    dec zp_inv
+.ui_done:
+    rts
+
+; Award the jump-over bonus once per obstacle, when its right
+; edge has passed the player's left edge. Only a jump in the
+; obstacle's lane counts; zp_obs_scored is set either way.
+check_bonus:
+    jsr set_player_box
+    ldx #0
+.cb_slot:
+    lda zp_obs_active,x
+    beq .cb_next
+    lda zp_obs_scored,x
+    bne .cb_next
+    lda zp_obs_x_hi,x
+    beq .cb_on_screen
+    cmp #$ff
+    beq .cb_passed          ; already off the left edge
+    jmp .cb_next            ; x >= 256 : still to the right
+.cb_on_screen:
+    ldy zp_obs_type,x
+    lda zp_obs_x_lo,x
+    clc
+    adc #23
+    bcs .cb_next            ; right edge > 255 : still to the right
+    sec
+    sbc obs_hit_r,y
+    cmp zp_px1
+    bcs .cb_next            ; right edge not past the player yet
+.cb_passed:
+    lda #1
+    sta zp_obs_scored,x
+    lda zp_jump_t
+    beq .cb_next            ; not jumping : no bonus
+    lda zp_obs_y,x
+    sec
+    sbc zp_player_y
+    bcs .cb_diff
+    eor #$ff
+    adc #1                  ; absolute difference
+.cb_diff:
+    cmp #20
+    bcs .cb_next            ; different lane
+    jsr add_bonus
+.cb_next:
+    inx
+    cpx #6
+    bne .cb_slot
+    rts
+
+; Write the obstacle sprites and build the sprite enable mask:
+; bit 0 is the player, bits 1-6 are the obstacle slots.
+write_obstacles:
+    lda #1
+    sta zp_mask
+    ldx #0
+.wo_slot:
+    lda zp_obs_active,x
+    beq .wo_next
+    txa
+    pha                     ; set_sprite_x clobbers X and Y
+    lda zp_obs_x_hi,x
+    cmp #1                  ; carry set when x >= 256
+    lda zp_obs_x_lo,x
+    inx                     ; sprite index = slot + 1
+    jsr set_sprite_x
+    pla
+    tax
+    ldy zp_obs_type,x
+    lda obs_ptr,y
+    sta SPR_PTR+1,x
+    lda obs_color,y
+    sta VIC_SPR0_COL+1,x
+    txa
+    asl
+    tay
+    lda zp_obs_y,x
+    sta VIC_SPR0_Y+2,y      ; sprite i Y = $D001 + 2i
+    lda sprite_bit+1,x
+    ora zp_mask
+    sta zp_mask
+.wo_next:
+    inx
+    cpx #6
+    bne .wo_slot
+    lda zp_inv
+    beq .wo_enable
+    lda zp_frame
+    and #%00000100
+    beq .wo_enable
+    lda zp_mask
+    and #%11111110          ; flash the player while invulnerable
+    sta zp_mask
+.wo_enable:
+    lda zp_mask
+    sta VIC_SPR_ENA
+    rts
+
+; ============================================================
 ;  SCORE  (4 digit BCD)
 ; ============================================================
 add_score:
@@ -523,6 +964,20 @@ add_score:
     adc #$00
     sta zp_score_h
     cld
+    rts
+
+; +25 points for clearing an obstacle, in BCD.
+add_bonus:
+    sed
+    lda zp_score_l
+    clc
+    adc #BONUS_POINTS
+    sta zp_score_l
+    lda zp_score_h
+    adc #$00
+    sta zp_score_h
+    cld
+    jsr beep_bonus
     rts
 
 draw_score:
@@ -550,6 +1005,13 @@ draw_score:
     sta SCREEN+1*40+9
     rts
 
+; Lives are a single digit; the label is drawn once by start_game.
+draw_lives:
+    lda zp_lives
+    ora #$30
+    sta SCREEN+1*40+36
+    rts
+
 ; ============================================================
 ;  SOUND  (short SID noise burst)
 ; ============================================================
@@ -569,6 +1031,26 @@ beep_hit:
     lda #$81                ; noise waveform + gate
     sta SID_V1_CTRL
     lda #20
+    sta zp_snd
+    rts
+
+; Short high beep for the jump-over bonus.
+beep_bonus:
+    lda #0
+    sta SID_V1_CTRL
+    lda #$0f
+    sta SID_VOL
+    lda #0
+    sta SID_V1_FLO
+    lda #$40
+    sta SID_V1_FHI
+    lda #0
+    sta SID_V1_AD
+    lda #$f0
+    sta SID_V1_SR
+    lda #$11                ; triangle waveform + gate
+    sta SID_V1_CTRL
+    lda #12
     sta zp_snd
     rts
 
@@ -931,6 +1413,8 @@ txt_joy:     !text "JOYSTICK PORT 2"
              !byte 0
 txt_score:   !text "SCORE"
              !byte 0
+txt_lives:   !text "LIVES"
+             !byte 0
 txt_over:    !text "GAME OVER"
              !byte 0
 txt_again:   !text "FIRE TO RESTART"
@@ -943,7 +1427,30 @@ bike_frames:
     !byte $80, $81          ; pedalling frames A and B
 
 jump_lift:
-    !byte 0,4,8,12,16,20,24,28,28,24,20,16,12,8,4,0
+    !byte 0,4,8,12,16,20,24,28,28,28,28,28,28,24,20,16,12,8,4,0
+
+; Obstacle lanes: the sprite Y of each lane. The sprite's bottom
+; row is the ground line, so an obstacle in the player's lane uses
+; the same Y as the bike.
+lane_y:
+    !byte 128, 152, 176
+
+; Obstacle type tables, indexed by zp_obs_type.
+;   sprite pointer, colour, hitbox insets (left, right, top, bottom)
+; The insets are relative to the 24x21 sprite cell and are
+; deliberately smaller than the artwork so the hitboxes are fair.
+obs_ptr:
+    !byte $83, $84, $85, $86
+obs_color:
+    !byte 8, 15, 2, 11
+obs_hit_l:
+    !byte 8, 6, 6, 4
+obs_hit_r:
+    !byte 8, 6, 6, 4
+obs_hit_t:
+    !byte 6, 6, 6, 14
+obs_hit_b:
+    !byte 0, 0, 0, 0
 
 sprite_bit:
     !byte 1,2,4,8,16,32,64,128
@@ -968,9 +1475,14 @@ row_colors:
 ;  $2000  bike frame A   ptr $80
 ;  $2040  bike frame B   ptr $81
 ;  $2080  bike jump      ptr $82
+;  $20c0  cone           ptr $83
+;  $2100  trash can      ptr $84
+;  $2140  barrier        ptr $85
+;  $2180  pothole        ptr $86
 ;
-;  The images are multicolor: 01 = $D025 (green),
+;  The bike images are multicolor: 01 = $D025 (green),
 ;  10 = $D027 (sprite colour), 11 = $D026 (light blue).
+;  The obstacles are hires: one colour each, from obs_color.
 ; ============================================================
 !fill $2000 - *, 0
 
@@ -992,4 +1504,104 @@ spr_bike_jump:
     !byte $f0,$00,$00,$fc,$00,$00,$f3,$00,$00,$f2,$80,$00,$30,$80,$0a,$ba
     !byte $80,$02,$30,$a0,$0a,$32,$08,$20,$be,$08,$20,$a8,$a0,$20,$80,$00
     !byte $0a,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$8b
+
+; Traffic cone: triangle with a transparent band for the stripe.
+spr_cone:
+    !byte $00,$00,$00       ; 0
+    !byte $00,$00,$00       ; 1
+    !byte $00,$00,$00       ; 2
+    !byte $00,$00,$00       ; 3
+    !byte $00,$00,$00       ; 4
+    !byte $00,$00,$00       ; 5
+    !byte $00,$18,$00       ; 6  tip
+    !byte $00,$18,$00       ; 7
+    !byte $00,$3c,$00       ; 8
+    !byte $00,$3c,$00       ; 9
+    !byte $00,$7e,$00       ; 10
+    !byte $00,$7e,$00       ; 11
+    !byte $00,$00,$00       ; 12 stripe gap
+    !byte $00,$00,$00       ; 13 stripe gap
+    !byte $01,$ff,$80       ; 14
+    !byte $01,$ff,$80       ; 15
+    !byte $03,$ff,$c0       ; 16
+    !byte $03,$ff,$c0       ; 17
+    !byte $07,$ff,$e0       ; 18
+    !byte $0f,$ff,$f0       ; 19 base
+    !byte $0f,$ff,$f0       ; 20
+    !byte $00               ; padding : keeps the block 64 bytes
+
+; Trash can: lid with a handle and a ribbed body.
+spr_trash:
+    !byte $00,$00,$00       ; 0
+    !byte $00,$3c,$00       ; 1  handle
+    !byte $00,$3c,$00       ; 2
+    !byte $0f,$ff,$f0       ; 3  lid
+    !byte $0f,$ff,$f0       ; 4
+    !byte $0f,$ff,$f0       ; 5
+    !byte $07,$ff,$e0       ; 6  body
+    !byte $07,$ff,$e0       ; 7
+    !byte $07,$ff,$e0       ; 8
+    !byte $07,$00,$e0       ; 9  rib
+    !byte $07,$ff,$e0       ; 10
+    !byte $07,$ff,$e0       ; 11
+    !byte $07,$ff,$e0       ; 12
+    !byte $07,$ff,$e0       ; 13
+    !byte $07,$00,$e0       ; 14 rib
+    !byte $07,$ff,$e0       ; 15
+    !byte $07,$ff,$e0       ; 16
+    !byte $07,$ff,$e0       ; 17
+    !byte $07,$ff,$e0       ; 18
+    !byte $07,$ff,$e0       ; 19
+    !byte $0f,$ff,$f0       ; 20 base
+    !byte $00               ; padding : keeps the block 64 bytes
+
+; Road barrier: striped board on two legs.
+spr_barrier:
+    !byte $00,$00,$00       ; 0
+    !byte $00,$00,$00       ; 1
+    !byte $00,$00,$00       ; 2
+    !byte $00,$00,$00       ; 3
+    !byte $ff,$ff,$ff       ; 4  board
+    !byte $ff,$ff,$ff       ; 5
+    !byte $00,$00,$00       ; 6  stripe gap
+    !byte $ff,$ff,$ff       ; 7
+    !byte $ff,$ff,$ff       ; 8
+    !byte $00,$00,$00       ; 9  stripe gap
+    !byte $ff,$ff,$ff       ; 10
+    !byte $0c,$00,$30       ; 11 legs
+    !byte $0c,$00,$30       ; 12
+    !byte $0c,$00,$30       ; 13
+    !byte $0c,$00,$30       ; 14
+    !byte $0c,$00,$30       ; 15
+    !byte $0c,$00,$30       ; 16
+    !byte $0c,$00,$30       ; 17
+    !byte $0c,$00,$30       ; 18
+    !byte $0c,$00,$30       ; 19
+    !byte $1e,$00,$78       ; 20 feet
+    !byte $00               ; padding : keeps the block 64 bytes
+
+; Pothole: flat irregular oval near the bottom of the cell.
+spr_pothole:
+    !byte $00,$00,$00       ; 0
+    !byte $00,$00,$00       ; 1
+    !byte $00,$00,$00       ; 2
+    !byte $00,$00,$00       ; 3
+    !byte $00,$00,$00       ; 4
+    !byte $00,$00,$00       ; 5
+    !byte $00,$00,$00       ; 6
+    !byte $00,$00,$00       ; 7
+    !byte $00,$00,$00       ; 8
+    !byte $00,$00,$00       ; 9
+    !byte $00,$00,$00       ; 10
+    !byte $00,$00,$00       ; 11
+    !byte $00,$00,$00       ; 12
+    !byte $00,$00,$00       ; 13
+    !byte $00,$7e,$00       ; 14
+    !byte $03,$ff,$c0       ; 15
+    !byte $1f,$ff,$f8       ; 16
+    !byte $3f,$ff,$fc       ; 17
+    !byte $3f,$ff,$fc       ; 18
+    !byte $0f,$ff,$f0       ; 19
+    !byte $03,$ff,$c0       ; 20
+    !byte $00               ; padding : keeps the block 64 bytes
 }
