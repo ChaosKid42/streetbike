@@ -30,7 +30,14 @@
 ; documented instruction set is identical. `!cpu 6510` would also enable
 ; undocumented opcodes, which this program deliberately avoids.
 !cpu 6502
-!to "build/streetbike.prg", cbm
+
+; The same source builds either a PRG or a cartridge image. The
+; cart build defines CART on the ACME command line (`acme -DCART=1`).
+!ifdef CART {
+    !to "build/streetbike.crt.bin", plain
+} else {
+    !to "build/streetbike.prg", cbm
+}
 
 ; ------------------------------------------------------------
 ;  VIC-II / CIA / SID registers
@@ -164,11 +171,21 @@ IRQ_LINE_PLAY = 68          ; $D016 fine scroll = zp_fine below
 }
 
 ; ------------------------------------------------------------
-;  BASIC loader:  10 SYS 2061
-;  ACME's cbm output format writes the two-byte PRG load
-;  address ($01 $08) in front of the data.
+;  Start address and startup header
 ; ------------------------------------------------------------
-* = $0801
+!ifdef CART {
+    ; Generic 8 KiB "normal" cartridge at $8000-$9FFF. The KERNAL
+    ; autostarts it when it finds the reset vector at $8000/$8001
+    ; and the "CBM80" signature at $8004-$8008.
+    * = $8000
+    !word start             ; reset vector
+    !word start             ; NMI vector (unused)
+    !byte $c3, $c2, $cd, $38, $30   ; "CBM80"
+} else {
+    ; BASIC loader:  10 SYS 2061
+    ; ACME's cbm output format writes the two-byte PRG load
+    ; address ($01 $08) in front of the data.
+    * = $0801
 
     !word $080b             ; link to end-of-program marker
     !word 10                ; line number
@@ -177,13 +194,28 @@ IRQ_LINE_PLAY = 68          ; $D016 fine scroll = zp_fine below
     !byte 0
     !word 0
 
-; $080d                   ; 2061 decimal -> machine code
+    ; $080d               ; 2061 decimal -> machine code
+}
 
 ; ============================================================
 ;  INIT
 ; ============================================================
 start:
     sei
+    ; A cartridge is entered before the KERNAL has initialized the
+    ; 6510 port, so set up the stack and the port here. Write the
+    ; data register before the direction register:
+    ; at power-on the DDR is all inputs, so the port reads the
+    ; pull-ups and keeps the cartridge mapped. Making the bank bits
+    ; outputs first would drive the zero data register onto them and
+    ; unmap the cartridge ROM at $8000.
+    ldx #$ff
+    txs
+    lda #$37
+    sta $01
+    lda #$2f
+    sta $00
+
     lda #$7f
     sta $dc0d               ; disable CIA1 interrupts
     sta $dd0d               ; disable CIA2 interrupts
@@ -193,6 +225,17 @@ start:
     lda #0
     sta VIC_IRQ_ENA         ; disable VIC raster interrupts for now
 
+!ifdef CART {
+    ; The cartridge ROM at $8000 is only mapped while HIRAM is set,
+    ; so the KERNAL has to stay banked in. Use the KERNAL's RAM IRQ
+    ; vector at $0314/$0315; the hardware vectors are ROM.
+    lda #$37
+    sta $01
+    lda #<irq_hud
+    sta $0314
+    lda #>irq_hud
+    sta $0315
+} else {
     ; Bank out BASIC and KERNAL so the CPU vectors at $FFFA-$FFFF
     ; are RAM and can point straight at our handlers. I/O stays
     ; mapped at $D000-$DFFF. Nothing here uses the ROMs.
@@ -206,6 +249,7 @@ start:
     sta $fffe
     lda #>irq_hud
     sta $ffff
+}
 
     lda #$00
     sta CIA1_DDRA           ; joystick port 2 = input
@@ -216,6 +260,24 @@ start:
 
     lda #$15                ; screen $0400, uppercase/graphics charset $1000
     sta $d018
+
+!ifdef CART {
+    ; The VIC can only fetch sprite data from RAM, so copy the
+    ; images from the cartridge ROM to the usual $2000 block.
+    ldx #0
+.cp_spr_lo:
+    lda spr_data_rom,x
+    sta $2000,x
+    inx
+    bne .cp_spr_lo
+    ldx #0
+.cp_spr_hi:
+    lda spr_data_rom+256,x
+    sta $2100,x
+    inx
+    cpx #192
+    bne .cp_spr_hi
+}
 
     ; sprite data pointers -----------------------------------
     ldx #0
@@ -1285,6 +1347,10 @@ wait_frame:
 ;  The main loop no longer touches $D016; it just keeps zp_fine
 ;  up to date and irq_play applies it once per frame.
 ;
+;  The PRG build owns the hardware vector at $FFFE/$FFFF. The cart
+;  build keeps the KERNAL banked in, so it chains through the
+;  KERNAL's $0314/$0315 vector and exits via $EA81.
+;
 ;  The HUD rows use 40 columns so text at column 0 is fully
 ;  visible. The scrolling rows use 38 columns: the side borders
 ;  grow by one character and hide columns 0 and 39, which are
@@ -1300,30 +1366,53 @@ irq_hud:
     sta VIC_CTRL2
     lda #IRQ_LINE_PLAY
     sta VIC_RASTER
+!ifdef CART {
+    lda #<irq_play
+    sta $0314
+    lda #>irq_play
+    sta $0315
+} else {
     lda #<irq_play
     sta $fffe
     lda #>irq_play
     sta $ffff
+}
     lda #$01
     sta VIC_IRQ
     pla
+!ifdef CART {
+    jmp $ea81               ; KERNAL IRQ exit: pop Y/X/A and RTI
+} else {
     rti
+}
 
 irq_play:
     pha
     jsr write_fine_scroll   ; rows 2-24 : 38 columns, scroll by zp_fine
     lda #IRQ_LINE_HUD
     sta VIC_RASTER
+!ifdef CART {
+    lda #<irq_hud
+    sta $0314
+    lda #>irq_hud
+    sta $0315
+} else {
     lda #<irq_hud
     sta $fffe
     lda #>irq_hud
     sta $ffff
+}
     lda #$01
     sta VIC_IRQ
     pla
+!ifdef CART {
+    jmp $ea81               ; KERNAL IRQ exit: pop Y/X/A and RTI
+} else {
     rti
+}
 
-; RESTORE key: with the KERNAL banked out the NMI vector is ours.
+; RESTORE key: in the PRG build the KERNAL is banked out and the
+; NMI vector is ours. The cart build keeps the KERNAL's NMI handler.
 nmi_handler:
     rti
 
@@ -1708,8 +1797,14 @@ row_colors:
 ;  10 = $D027 (sprite colour), 11 = $D026 (light blue).
 ;  The obstacles are hires: one colour each, from obs_color.
 ; ============================================================
-!fill $2000 - *, 0
+!ifndef CART {
+    !fill $2000 - *, 0
+}
 
+; In the cart build the images are emitted right after the code
+; and copied to $2000 by the startup code; `spr_data_rom` is
+; their address in the ROM.
+spr_data_rom:
 !pseudopc $2000 {
 spr_bike_a:
     !byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
@@ -1828,4 +1923,10 @@ spr_pothole:
     !byte $0f,$ff,$f0       ; 19
     !byte $03,$ff,$c0       ; 20
     !byte $00               ; padding : keeps the block 64 bytes
+}
+
+!ifdef CART {
+    ; Pad the image to the full 8 KiB so cartconv emits a standard
+    ; 8 KiB "normal" cartridge.
+    !fill $a000 - *, 0
 }
