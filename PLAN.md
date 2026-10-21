@@ -462,7 +462,38 @@ Lessons from implementation:
 left, can be jumped over for bonus points, cost a life on contact, and never
 drain all lives in a single overlap.
 
-### Phase 5 — Scoring, HUD and difficulty
+### Phase 5 — Title screen and game over
+
+**Status: not started.**
+
+1. Title screen (state 0 in §3.5):
+   - `STREETBIKE` centred.
+   - `PRESS FIRE TO PLAY`.
+   - `JOYSTICK PORT 2`.
+   - A short control hint: `UP/DOWN/LEFT/RIGHT MOVE  FIRE JUMP`.
+   - Bike animates in place; background scrolls slowly; no obstacles.
+   - Fire starts the game via `start_game`.
+2. Game over (state 2 in §3.5):
+   - Freeze the world.
+   - Show `GAME OVER`, the final score, and `PRESS FIRE`.
+   - Fire returns to the title screen instead of restarting immediately.
+   - Keep the input delay (`zp_cool`) to avoid accidental input.
+
+Implementation notes:
+
+- Route both screens through the existing state switch in the frame loop
+  (§3.6) rather than adding a second loop.
+- The title screen reuses the play-state background scroll at a reduced speed
+  and the bike animation, but skips obstacle spawning, collision and scoring.
+- The game-over screen is entered from the crash sequence when no lives are
+  left; it must not clear the score before drawing it.
+- The HUD raster split stays active on both screens so the text rows are not
+  affected by the fine scroll.
+
+**Acceptance:** The game boots to the title screen, fire starts play, running
+out of lives shows the final score, and fire returns to the title screen.
+
+### Phase 6 — Scoring, HUD and difficulty
 
 1. Survival score: add 1 point every 8 frames while playing.
 2. Jump bonus: +25 per obstacle jumped over.
@@ -481,33 +512,22 @@ drain all lives in a single overlap.
 **Acceptance:** The score rises while surviving, jumping over obstacles adds
 bonus points, the HUD updates correctly, and the game visibly speeds up.
 
-### Phase 6 — Title screen, game over, sound and polish
+### Phase 7 — Sound and polish
 
-1. Title screen:
-   - `STREETBIKE` centred.
-   - `PRESS FIRE TO PLAY`.
-   - `JOYSTICK PORT 2`.
-   - A short control hint: `UP/DOWN/LEFT/RIGHT MOVE  FIRE JUMP`.
-   - Bike animates in place; background scrolls slowly; no obstacles.
-2. Game over:
-   - Freeze the world.
-   - Show `GAME OVER`, the final score, and `PRESS FIRE`.
-   - Fire returns to the title screen instead of restarting immediately.
-   - Keep the input delay (`zp_cool`) to avoid accidental input.
-3. Sound:
+1. Sound:
    - The crash sequence plays a descending sad tune instead of a hit beep.
    - Add `beep_jump` (short rising pulse) and `beep_bonus` (short high beep).
    - Optional: a low engine tone on SID voice 2 whose frequency follows
      `zp_speed`.
-4. Optional polish:
+2. Optional polish:
    - Fine scroll and HUD raster split (Phases 3b–3c) if not already done.
    - A second obstacle sprite for wide obstacles (e.g., a car).
    - A high-score byte shown on the title screen.
 
-**Acceptance:** The title, play and game-over flows are complete and the game
-feels responsive.
+**Acceptance:** The sound effects and optional polish are in place and the
+game feels responsive.
 
-### Phase 7 — Testing and documentation
+### Phase 8 — Testing and documentation
 
 1. Run the manual test checklist in §7.
 2. Update `README.md`:
