@@ -172,7 +172,7 @@ port). Suggested layout:
 | `$0C` | `zp_inv` | 1 | Invulnerability countdown |
 | `$0D` | `zp_fire_prev` | 1 | Previous fire state (edge detect) |
 | `$0E` | `zp_joy` | 1 | Current joystick byte |
-| `$0F` | `zp_cool` | 1 | Game-over restart delay |
+| `$0F` | `zp_cool` | 1 | Game-over input delay |
 | `$10` | `zp_snd` | 1 | Sound effect countdown |
 | `$11` | `zp_rand` | 1 | LFSR state |
 | `$12` | `zp_fine` | 1 | Fine scroll value (0–7) |
@@ -209,7 +209,7 @@ Keep the existing three-state machine:
 |-------|-------|-----------|
 | Title | 0 | Background scrolls slowly, bike animates, no obstacles, fire starts |
 | Play | 1 | Full game loop |
-| Game over | 2 | World frozen, final score shown, fire restarts after a delay |
+| Game over | 2 | World frozen, final score shown, fire returns to the title screen after a delay |
 
 ### 3.6 Frame loop
 
@@ -227,7 +227,7 @@ switch on state:
              update score / difficulty
              write sprites (X/Y, pointers, enable mask, 9th X bit)
              update HUD
-  game over: count down restart delay, wait for fire
+  game over: count down input delay, wait for fire to return to title
 
 independently, raster IRQs on lines 50 and 68 write $D016 so the
 HUD rows 0-1 are unscrolled and rows 2-24 use zp_fine
@@ -480,8 +480,9 @@ bonus points, the HUD updates correctly, and the game visibly speeds up.
    - Bike animates in place; background scrolls slowly; no obstacles.
 2. Game over:
    - Freeze the world.
-   - Show `GAME OVER`, the final score, and `FIRE TO RESTART`.
-   - Keep the restart delay (`zp_cool`) to avoid accidental restarts.
+   - Show `GAME OVER`, the final score, and `PRESS FIRE`.
+   - Fire returns to the title screen instead of restarting immediately.
+   - Keep the input delay (`zp_cool`) to avoid accidental input.
 3. Sound:
    - Reuse `beep_hit` for collisions.
    - Add `beep_jump` (short rising pulse) and `beep_bonus` (short high beep).
@@ -610,7 +611,7 @@ Build and run with `ninja` / `ninja run`, then verify:
 - [ ] Dodging an obstacle in another lane does not award bonus points.
 - [ ] The score rises while surviving and the HUD updates.
 - [ ] The game speeds up and spawns obstacles more often as the score rises.
-- [ ] Game over shows the final score and fire restarts the game.
+- [ ] Game over shows the final score and fire returns to the title screen.
 - [ ] The frame loop keeps up; no visible slowdown or sprite flicker.
 - [ ] The assembled PRG stays below the `$2000` sprite-data boundary.
 

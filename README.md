@@ -64,7 +64,7 @@ image**) or write to a real floppy.
 
 * Joystick in **port 2**
 * Left / right = move
-* Fire = start / restart
+* Fire = start / return to title
 
 In VICE, joystick port 2 is normally the numeric keypad
 (`4` / `6` to move, `0` to fire) or the arrow keys, depending on your

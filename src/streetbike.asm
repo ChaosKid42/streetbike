@@ -7,7 +7,7 @@
 ;  Controls  : Joystick in port 2
 ;              left / right = move along the street
 ;              up / down    = change lane
-;              fire         = jump / start / restart
+;              fire         = jump / start / return to title
 ;
 ;  The program takes over the machine: it disables interrupts,
 ;  owns the VIC-II sprites and runs its own frame loop.
@@ -81,7 +81,7 @@ zp_lives      = $0b
 zp_inv        = $0c         ; invulnerability countdown
 zp_fire_prev  = $0d         ; previous fire state (edge detect)
 zp_joy        = $0e
-zp_cool       = $0f         ; game-over restart delay
+zp_cool       = $0f         ; game-over input delay
 zp_snd        = $10         ; sound countdown
 zp_rand       = $11
 zp_fine       = $12         ; fine scroll value (0-7)
@@ -199,8 +199,6 @@ start:
     lda #$15                ; screen $0400, uppercase/graphics charset $1000
     sta $d018
 
-    jsr draw_background
-
     ; sprite data pointers -----------------------------------
     ldx #0
     lda #$80                ; $2000 / 64 : bike frame A
@@ -227,51 +225,7 @@ start:
     sta VIC_SPR_XEXP
     sta VIC_SPR_BPRI
 
-    lda #%00000001          ; title screen : only player visible
-    sta VIC_SPR_ENA
-
-    ; reset state --------------------------------------------
-    lda #0
-    sta zp_state
-    sta zp_score_l
-    sta zp_score_h
-    sta zp_cool
-    sta zp_snd
-    sta zp_jump_t
-    sta zp_jump_lift
-    sta zp_bike_frame
-    sta zp_fire_prev
-    sta zp_inv
-    sta zp_frame
-    sta zp_fine
-    ldx #0
-.is_clear:
-    sta zp_obs_active,x
-    sta zp_obs_scored,x
-    inx
-    cpx #6
-    bne .is_clear
-    lda #2
-    sta zp_speed
-    lda #4
-    sta zp_anim
-    lda #3
-    sta zp_lives
-    lda #SPAWN_FRAMES
-    sta zp_spawn
-    lda #$a7
-    sta zp_rand
-
-    lda #80
-    sta zp_player_x
-    lda #152                ; start in the middle lane
-    sta zp_player_y
-    jsr write_player
-
-    ; title text
-    +print_at SCREEN+10*40+13, txt_title
-    +print_at SCREEN+14*40+11, txt_press
-    +print_at SCREEN+16*40+12, txt_joy
+    jsr title_screen
 
     ; raster split -------------------------------------------
     lda #$1b                ; screen on, 25 rows, Y scroll 3, raster MSB 0
@@ -324,10 +278,15 @@ main_loop:
     jsr write_player
     lda zp_joy
     and #%00010000          ; fire (active low)
-    beq .start
-    jmp main_loop
-.start:
+    bne .title_release
+    lda zp_fire_prev
+    bne .title_wait         ; still held from the game-over screen
     jsr start_game
+    jmp main_loop
+.title_release:
+    lda #0
+    sta zp_fire_prev
+.title_wait:
     jmp main_loop
 
 .gameover:
@@ -341,7 +300,7 @@ main_loop:
     beq .restart
     jmp main_loop
 .restart:
-    jsr start_game
+    jsr title_screen
     jmp main_loop
 
 ; ============================================================
@@ -397,9 +356,62 @@ start_game:
     rts
 
 ; ============================================================
+;  TITLE SCREEN
+;  Rebuilds the complete title state. Used at boot and when
+;  the player leaves the game-over screen.
+; ============================================================
+title_screen:
+    lda #0
+    sta zp_state
+    sta zp_score_l
+    sta zp_score_h
+    sta zp_cool
+    sta zp_snd
+    sta zp_jump_t
+    sta zp_jump_lift
+    sta zp_bike_frame
+    sta zp_inv
+    sta zp_frame
+    sta zp_fine
+    ldx #0
+.ts_clear:
+    sta zp_obs_active,x
+    sta zp_obs_scored,x
+    inx
+    cpx #6
+    bne .ts_clear
+    lda #2
+    sta zp_speed
+    lda #4
+    sta zp_anim
+    lda #3
+    sta zp_lives
+    lda #SPAWN_FRAMES
+    sta zp_spawn
+    lda #$a7
+    sta zp_rand
+    lda #1
+    sta zp_fire_prev        ; fire may still be held : wait for release
+
+    lda #80
+    sta zp_player_x
+    lda #152                ; start in the middle lane
+    sta zp_player_y
+
+    lda #%00000001          ; title screen : only player visible
+    sta VIC_SPR_ENA
+
+    jsr draw_background
+    +print_at SCREEN+10*40+13, txt_title
+    +print_at SCREEN+14*40+11, txt_press
+    +print_at SCREEN+16*40+12, txt_joy
+    jsr write_player
+    rts
+
+; ============================================================
 ;  GAME OVER
 ;  The world is frozen by the state machine; hide every sprite
-;  and free the obstacle slots so a restart starts clean.
+;  and free the obstacle slots so the title screen starts clean.
 ; ============================================================
 game_over:
     lda #2
@@ -415,7 +427,7 @@ game_over:
     cpx #6
     bne .go_clear
     +print_at SCREEN+10*40+15, txt_over
-    +print_at SCREEN+14*40+12, txt_again
+    +print_at SCREEN+14*40+15, txt_again
     rts
 
 ; ============================================================
@@ -1417,7 +1429,7 @@ txt_lives:   !text "LIVES"
              !byte 0
 txt_over:    !text "GAME OVER"
              !byte 0
-txt_again:   !text "FIRE TO RESTART"
+txt_again:   !text "PRESS FIRE"
              !byte 0
 
 ; ============================================================
