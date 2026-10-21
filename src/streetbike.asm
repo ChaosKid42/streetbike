@@ -21,8 +21,9 @@
 ;  Phase 4 adds the obstacles, the software hitboxes, the
 ;  jump-over bonus and the three lives. A hit now plays a crash
 ;  sequence: the world freezes, the bike is thrown off the screen
-;  with a sad tune, and a get-ready screen follows. Scoring and
-;  difficulty follow in Phase 5; see PLAN.md.
+;  with a sad tune, and a get-ready screen follows. Phase 5 adds
+;  the title screen and the game-over screen. Scoring and
+;  difficulty follow in Phase 6; see PLAN.md.
 ; ============================================================
 
 ; The C64's 6510 is a 6502 core with an added I/O port at $00/$01; its
@@ -294,6 +295,7 @@ main_loop:
     jmp main_loop
 
 .title:
+    jsr update_title_scroll
     jsr animate_bike
     jsr write_player
     lda zp_joy
@@ -403,6 +405,9 @@ resume_game:
 ;  TITLE SCREEN
 ;  Rebuilds the complete title state. Used at boot and when
 ;  the player leaves the game-over screen.
+;
+;  The text lives in the sky rows 2-5, which shift_rows never
+;  touches, so it stays put while the street scrolls below it.
 ; ============================================================
 title_screen:
     lda #0
@@ -446,9 +451,10 @@ title_screen:
     sta VIC_SPR_ENA
 
     jsr draw_background
-    +print_at SCREEN+10*40+13, txt_title
-    +print_at SCREEN+14*40+11, txt_press
-    +print_at SCREEN+16*40+12, txt_joy
+    +print_at SCREEN+2*40+15, txt_title
+    +print_at SCREEN+3*40+11, txt_press
+    +print_at SCREEN+4*40+12, txt_joy
+    +print_at SCREEN+5*40+3, txt_hint
     jsr write_player
     rts
 
@@ -470,8 +476,14 @@ game_over:
     inx
     cpx #6
     bne .go_clear
-    +print_at SCREEN+10*40+15, txt_over
-    +print_at SCREEN+14*40+15, txt_again
+    +print_at SCREEN+9*40+15, txt_over
+    +print_at SCREEN+11*40+15, txt_score
+    +print_at SCREEN+13*40+15, txt_again
+    lda #<SCREEN+11*40+21
+    sta zp_dst
+    lda #>SCREEN+11*40+21
+    sta zp_dst+1
+    jsr draw_score_at
     rts
 
 ; ============================================================
@@ -1173,28 +1185,45 @@ add_bonus:
     rts
 
 draw_score:
-    lda zp_score_h
+    lda #<SCREEN+1*40+6
+    sta zp_dst
+    lda #>SCREEN+1*40+6
+    sta zp_dst+1
+    jmp draw_score_at
+
+; Write the four BCD score digits at zp_dst, in white. The colour
+; is written too, so the digits stay readable on the game-over
+; screen, where the row colour is not the HUD's white.
+draw_score_at:
+    lda zp_dst
+    sta zp_tmp
+    lda zp_dst+1
+    clc
+    adc #$d4                ; COLOR - SCREEN
+    sta zp_tmp2
+    ldy #0
+    ldx #1
+.dsa_byte:
+    lda zp_score_l,x        ; x = 1 : high byte, x = 0 : low byte
+    pha
     lsr
     lsr
     lsr
     lsr
     ora #$30
-    sta SCREEN+1*40+6
-    lda zp_score_h
+    sta (zp_dst),y
+    lda #1
+    sta (zp_tmp),y
+    iny
+    pla
     and #$0f
     ora #$30
-    sta SCREEN+1*40+7
-    lda zp_score_l
-    lsr
-    lsr
-    lsr
-    lsr
-    ora #$30
-    sta SCREEN+1*40+8
-    lda zp_score_l
-    and #$0f
-    ora #$30
-    sta SCREEN+1*40+9
+    sta (zp_dst),y
+    lda #1
+    sta (zp_tmp),y
+    iny
+    dex
+    bpl .dsa_byte
     rts
 
 ; Lives are a single digit; the label is drawn once by start_game.
@@ -1518,6 +1547,18 @@ update_scroll:
     sta zp_fine
     rts
 
+; Title screen: the street scrolls one whole column every 8
+; frames. The fine scroll is not used here, so the title text
+; does not wobble; the coarse shift is the same speed as
+; zp_speed = 1 would be.
+update_title_scroll:
+    lda zp_frame
+    and #7
+    bne .uts_done
+    jmp scroll_background
+.uts_done:
+    rts
+
 ; Apply zp_fine to $D016 and select 38-column mode, leaving the
 ; other bits (reset, text multicolor) untouched. Called from
 ; irq_play, so this is the mode for the scrolling rows only.
@@ -1578,11 +1619,13 @@ clear_screen:
 ; ============================================================
 ;  TEXT
 ; ============================================================
-txt_title:   !text "ASTEROID DODGE"
+txt_title:   !text "STREETBIKE"
              !byte 0
 txt_press:   !text "PRESS FIRE TO PLAY"
              !byte 0
 txt_joy:     !text "JOYSTICK PORT 2"
+             !byte 0
+txt_hint:    !text "UP/DOWN/LEFT/RIGHT MOVE  FIRE JUMP"
              !byte 0
 txt_score:   !text "SCORE"
              !byte 0

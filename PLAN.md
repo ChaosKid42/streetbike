@@ -464,7 +464,7 @@ drain all lives in a single overlap.
 
 ### Phase 5 — Title screen and game over
 
-**Status: not started.**
+**Status: complete.**
 
 1. Title screen (state 0 in §3.5):
    - `STREETBIKE` centred.
@@ -489,6 +489,26 @@ Implementation notes:
   left; it must not clear the score before drawing it.
 - The HUD raster split stays active on both screens so the text rows are not
   affected by the fine scroll.
+
+Lessons from implementation:
+
+- **The title text must live in rows 2–5.** `shift_rows` only shifts rows
+  6–24, so text in the sky rows is never moved by the coarse scroll. Text in
+  the scrolling rows would be left behind one column to the left on every
+  coarse shift and would wobble with the fine scroll. The four sky rows hold
+  the title, the two prompts and the 34-column control hint.
+- **The title scrolls without the fine scroll.** `update_title_scroll` shifts
+  one whole column every 8 frames, which is the same speed as `zp_speed = 1`
+  with fine scrolling but keeps the text perfectly still.
+- **`draw_score_at` takes a destination.** `draw_score` now sets `zp_dst` to
+  the HUD digits and falls through to `draw_score_at`, which the game-over
+  screen reuses. It also writes colour 1, because the game-over rows are
+  skyline blue and road grey, not the HUD's white.
+- **The score bytes are not in display order.** `zp_score_l` is at `$09` and
+  `zp_score_h` at `$0a`, so a single indexed load reads high then low only
+  when indexing `zp_score_l` with X = 1, 0. Indexing `zp_score_h,x` with
+  X = 1 reads `zp_lives`; the first test build showed the lives digit in the
+  score.
 
 **Acceptance:** The game boots to the title screen, fire starts play, running
 out of lives shows the final score, and fire returns to the title screen.
