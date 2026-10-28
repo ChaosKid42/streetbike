@@ -2,12 +2,12 @@
 """Capture the gameplay GIF from a headless VICE run.
 
 The script patches a throwaway copy of ``src/streetbike.asm`` in ``build/``,
-assembles it with ACME, drives ``x64sc.exe`` through the monitor to save one
+assembles it with ACME, drives ``x64sc`` through the monitor to save one
 PNG per frame, and encodes a segment of those frames into
 ``screenshots/gameplay.gif`` with ffmpeg.
 
 Run it from anywhere; all paths are resolved relative to the repository root.
-Requires ``acme``, ``x64sc.exe`` and ``ffmpeg`` on ``PATH``.
+Requires ``acme``, ``x64sc`` and ``ffmpeg`` on ``PATH``.
 """
 
 from __future__ import annotations
@@ -125,9 +125,10 @@ def capture_frames(frame_count: int, jump_first: int, jump_interval: int) -> Non
 
     # Autostart costs roughly 25M cycles; each PAL frame is about 20k.
     limit = max(60_000_000, 30_000_000 + frame_count * 30_000)
+    vice = shutil.which("x64sc") or shutil.which("x64sc.exe") or "x64sc"
     run(
         [
-            "x64sc.exe",
+            vice,
             "-autostart",
             str(TEST_PRG),
             "-moncommands",

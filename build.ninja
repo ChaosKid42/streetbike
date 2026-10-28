@@ -11,9 +11,9 @@
 ninja_required_version = 1.7
 
 acme = acme
-c1541 = c1541.exe
-cartconv = cartconv.exe
-vice = x64sc.exe
+c1541 = c1541
+cartconv = cartconv
+vice = x64sc
 
 # The source's `!to` directive selects the output file and the format.
 # The PRG build uses the CBM (two-byte load address) format.

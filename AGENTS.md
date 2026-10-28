@@ -6,7 +6,7 @@ Guidance for coding agents working on this repository.
 
 Streetbike is a Commodore 64 game written in 6502 assembly for the `acme`
 cross-assembler. It is assembled into a single PRG file and runs in the VICE
-emulator (`x64sc.exe`). The project is being refactored from the original
+emulator (`x64sc`). The project is being refactored from the original
 asteroid-dodge gameplay into a side-scrolling bike game; see `PLAN.md`.
 
 ## Commands
@@ -23,21 +23,21 @@ Equivalent manual build:
 
 ```sh
 acme src/streetbike.asm
-c1541.exe -format "streetbike,sb" d64 build/streetbike.d64 -write build/streetbike.prg streetbike
+c1541 -format "streetbike,sb" d64 build/streetbike.d64 -write build/streetbike.prg streetbike
 ```
 
-`acme`, `c1541.exe`, `ninja`, and `x64sc.exe` must be on `PATH`.
+`acme`, `c1541`, `ninja`, and `x64sc` must be on `PATH`.
 
 There is no automated test suite. Validation means the build succeeds and the
 game behaves correctly in VICE. `build/` is generated and git-ignored.
 
 ## Testing in VICE
 
-`x64sc.exe` is a GUI program on Windows and prints nothing to the console, so
-the practical way to check a change is a headless run that saves a screenshot:
+`x64sc` is a GUI program and prints nothing to the console, so the practical
+way to check a change is a headless run that saves a screenshot:
 
 ```sh
-x64sc.exe -autostart build/streetbike.prg -limitcycles 30000000 \
+x64sc -autostart build/streetbike.prg -limitcycles 30000000 \
     -exitscreenshot build/shot.png -warp
 ```
 
@@ -56,7 +56,7 @@ throwaway copy of the source in `build/` (git-ignored) instead of changing
 sed -i -e 's|build/streetbike.prg|build/test.prg|' \
        -e 's/^    cli$/    jsr start_game\n    cli/' build/test.asm
 acme build/test.asm
-x64sc.exe -autostart build/test.prg -limitcycles 40000000 \
+x64sc -autostart build/test.prg -limitcycles 40000000 \
     -exitscreenshot build/shot.png -warp
 ```
 
@@ -122,7 +122,7 @@ python3 tools/capture_gameplay.py --output build/preview.gif
 ```
 
 Without `--keep`, the script removes `build/test.asm`, `build/test.prg`,
-`build/test.labels`, `build/mon.txt` and `build/frames/`. `acme`, `x64sc.exe`
+`build/test.labels`, `build/mon.txt` and `build/frames/`. `acme`, `x64sc`
 and `ffmpeg` must be on `PATH`.
 
 ## Layout

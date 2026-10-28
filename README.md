@@ -2,7 +2,7 @@
 
 A Commodore 64 sprite game written for the
 [ACME](https://sourceforge.net/projects/acme-crossass/) cross-assembler and
-tested in **VICE** (`x64sc.exe`).
+tested in **VICE** (`x64sc`).
 
 ![Streetbike title screen](screenshots/title.png)
 
@@ -27,16 +27,16 @@ is gone it is game over.
 | `src/streetbike.asm` | Full commented source (ACME syntax) |
 | `build/streetbike.prg` | Assembled program, ready to load (generated) |
 | `build/streetbike.d64` | 1541 disk image containing `streetbike` (generated) |
-| `build.ninja` | Ninja build file: assembles with ACME, packs with c1541.exe |
+| `build.ninja` | Ninja build file: assembles with ACME, packs with c1541 |
 | `screenshots/` | Screenshots and an animated gameplay GIF, taken in VICE |
 | `PLAN.md` | Development plan for the Streetbike refactor |
 
 ## Build & run
 
-The build is driven by [Ninja](https://ninja-build.org/). `acme.exe`,
-`c1541.exe` (from VICE) and `ninja` must be on your `PATH`.
+The build is driven by [Ninja](https://ninja-build.org/). `acme`,
+`c1541` (from VICE) and `ninja` must be on your `PATH`.
 
-```bat
+```sh
 ninja
 ninja run
 ninja clean
@@ -44,17 +44,17 @@ ninja clean
 
 `ninja` assembles `src/streetbike.asm` directly into `build/streetbike.prg`
 with ACME, and then packs that PRG into the disk image
-`build/streetbike.d64` with `c1541.exe`;
+`build/streetbike.d64` with `c1541`;
 `ninja run` builds first if needed, then starts the game in VICE and returns
 when you close the emulator; `ninja clean` removes the generated build
 artifacts.
 
 Or manually:
 
-```bat
-acme src\streetbike.asm
-c1541.exe -format "streetbike,sb" d64 build\streetbike.d64 -write build\streetbike.prg streetbike
-"x64sc.exe" -autostart build\streetbike.prg
+```sh
+acme src/streetbike.asm
+c1541 -format "streetbike,sb" d64 build/streetbike.d64 -write build/streetbike.prg streetbike
+x64sc -autostart build/streetbike.prg
 ```
 
 The source's `!to "build/streetbike.prg", cbm` directive selects ACME's CBM
